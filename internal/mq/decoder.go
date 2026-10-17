@@ -65,11 +65,11 @@ func (d *Decoder) byteIn() {
 func (d *Decoder) Decode(cx *Context) int {
 	st := &table[cx.index]
 	qe := st.qe
-	d.a -= qe
+	a, c := d.a-qe, d.c
 	var bit uint8
-	if d.c>>16 < qe {
+	if c>>16 < qe {
 		// LPS exchange
-		if d.a < qe {
+		if a < qe {
 			bit = cx.mps
 			cx.index = st.nmps
 		} else {
@@ -77,14 +77,15 @@ func (d *Decoder) Decode(cx *Context) int {
 			cx.mps ^= st.sw
 			cx.index = st.nlps
 		}
-		d.a = qe
+		a = qe
 	} else {
-		d.c -= qe << 16
-		if d.a&0x8000 != 0 {
+		c -= qe << 16
+		if a&0x8000 != 0 {
+			d.a, d.c = a, c
 			return int(cx.mps)
 		}
 		// MPS exchange
-		if d.a < qe {
+		if a < qe {
 			bit = 1 - cx.mps
 			cx.mps ^= st.sw
 			cx.index = st.nlps
@@ -94,6 +95,7 @@ func (d *Decoder) Decode(cx *Context) int {
 		}
 	}
 	// RENORMD
+	d.a, d.c = a, c
 	for {
 		if d.ct == 0 {
 			d.byteIn()

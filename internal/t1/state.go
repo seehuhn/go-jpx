@@ -117,6 +117,23 @@ func (s *blockState) runLengthApplies(i int) bool {
 		st[i+3*stride]&(stSig|stVisited) == 0 && nb[i+3*stride] == 0
 }
 
+// columnIdle reports whether none of the four coefficients of the column
+// starting at state index i is significant or has a significant
+// neighbour, so that the significance pass has nothing to code there.
+func (s *blockState) columnIdle(i int) bool {
+	st, nb, stride := s.st, s.nb, s.stride
+	return nb[i]|nb[i+stride]|nb[i+2*stride]|nb[i+3*stride] == 0 &&
+		(st[i]|st[i+stride]|st[i+2*stride]|st[i+3*stride])&stSig == 0
+}
+
+// columnInsignificant reports whether none of the four coefficients of
+// the column starting at state index i is significant, so that the
+// refinement pass has nothing to code there.
+func (s *blockState) columnInsignificant(i int) bool {
+	st, stride := s.st, s.stride
+	return (st[i]|st[i+stride]|st[i+2*stride]|st[i+3*stride])&stSig == 0
+}
+
 // signState converts a neighbour's state into -1, 0 or +1.
 func signState(s uint8) int {
 	if s&stSig == 0 {

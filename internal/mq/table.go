@@ -11,7 +11,9 @@ type state struct {
 	sw   uint8  // 1 if the MPS sense flips after an LPS
 }
 
-var table = [47]state{
+// The table is padded to 256 entries so that indexing it with a context
+// index needs no bounds check; the entries beyond 46 are never used.
+var table = [256]state{
 	{0x5601, 1, 1, 1},
 	{0x3401, 2, 6, 0},
 	{0x1801, 3, 9, 0},
@@ -73,6 +75,9 @@ type Context struct {
 // in the range 0..46 and mps must be 0 or 1.  Index 46 is the uniform
 // state; coding itself never moves a context beyond index 45.
 func (c *Context) Reset(index, mps uint8) {
+	if index > 46 || mps > 1 {
+		panic("mq: invalid context state")
+	}
 	c.index = index
 	c.mps = mps
 }

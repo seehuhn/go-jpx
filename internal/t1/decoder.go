@@ -152,6 +152,9 @@ func (d *Decoder) sigPass(p int) {
 	for y0 := 0; y0 < h; y0 += 4 {
 		y1 := min(y0+4, h)
 		for x := range w {
+			if y1-y0 == 4 && d.columnIdle(d.index(x, y0)) {
+				continue
+			}
 			for y := y0; y < y1; y++ {
 				i := d.index(x, y)
 				if st[i]&stSig != 0 || nb[i] == 0 {
@@ -204,6 +207,9 @@ func (d *Decoder) refPass(p int) {
 	for y0 := 0; y0 < h; y0 += 4 {
 		y1 := min(y0+4, h)
 		for x := range w {
+			if y1-y0 == 4 && d.columnInsignificant(d.index(x, y0)) {
+				continue
+			}
 			for y := y0; y < y1; y++ {
 				i := d.index(x, y)
 				if st[i]&(stSig|stVisited) != stSig {
