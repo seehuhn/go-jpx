@@ -112,6 +112,9 @@ func (h *Header) parseFtyp(data []byte, charge func(int) error) error {
 	}
 	h.Brand = string(data[:4])
 	h.Compat = nil
+	if n := (len(data) - 8) / 4; n > 0 {
+		h.Compat = make([]string, 0, n)
+	}
 	for p := data[8:]; len(p) >= 4; p = p[4:] {
 		h.Compat = append(h.Compat, string(p[:4]))
 	}
@@ -128,6 +131,23 @@ func (h *Header) parseJp2h(data []byte, charge func(int) error) error {
 	if err != nil {
 		return err
 	}
+	colors := 0
+	for _, b := range boxes {
+		if b.Type == typeColr {
+			colors++
+		}
+	}
+	if err := charge(colors * 96); err != nil {
+		return err
+	}
+	if colors > 0 && h.Colors == nil {
+		h.Colors = make([]ColorSpec, 0, colors)
+	}
+	defer func() {
+		if len(h.Colors) == 0 {
+			h.Colors = nil
+		}
+	}()
 	// tolerate malformed boxes, but not other errors
 	tol := func(err error) error {
 		if errors.Is(err, errMalformed) {

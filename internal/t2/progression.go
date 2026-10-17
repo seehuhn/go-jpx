@@ -4,6 +4,7 @@
 package t2
 
 import (
+	"container/heap"
 	"errors"
 	"iter"
 	"math"
@@ -40,6 +41,9 @@ func (t *Tile) Packets(charge Charge) (iter.Seq[Packet], error) {
 	for _, tc := range t.Comps {
 		for _, res := range tc.Res {
 			rowsCols += res.PW + res.PH
+			if rowsCols > math.MaxInt/32 {
+				return nil, errors.New("t2: too many precincts")
+			}
 		}
 	}
 	if err := charge.charge(rowsCols * 16); err != nil {
@@ -50,6 +54,14 @@ func (t *Tile) Packets(charge Charge) (iter.Seq[Packet], error) {
 	if len(t.POC) == 0 {
 		vols = []volume{{0, maxRes, 0, len(t.Comps), t.Layers, t.Default}}
 	} else {
+		// every volume scans the (component, resolution) pairs of the tile
+		// before producing packets; account for that work like memory so
+		// that a flood of progression order changes is stopped by the
+		// budget rather than by a fixed limit
+		if err := charge.charge(len(t.POC) * (64 + len(t.Comps)*maxRes)); err != nil {
+			return nil, err
+		}
+		vols = make([]volume, 0, len(t.POC))
 		for _, e := range t.POC {
 			vols = append(vols, volume{
 				resStart:  e.ResStart,
@@ -189,16 +201,16 @@ func (t *Tile) volumePackets(v volume) iter.Seq[Packet] {
 				return
 			}
 		case codestream.CPRL:
-			for c := v.compStart; c < v.compEnd; c++ {
-				var sub []pair
-				for _, p := range ps {
-					if p.c == c {
-						sub = append(sub, p)
-					}
+			// ps is component-major, so each component is a contiguous run
+			for start := 0; start < len(ps); {
+				end := start
+				for end < len(ps) && ps[end].c == ps[start].c {
+					end++
 				}
-				if !t.yieldPositions(yield, v, sub) {
+				if !t.yieldPositions(yield, v, ps[start:end]) {
 					return
 				}
+				start = end
 			}
 		}
 	}
@@ -228,9 +240,10 @@ func (t *Tile) anchorOf(p pair) anchor {
 
 // yieldPositions emits, in raster order of the precinct start positions
 // on the reference grid, the packets of all layers of the given pairs.
-// Only positions at which some pair has a precinct are visited, so the
-// work is proportional to the number of precincts.  Pairs are visited in
-// the order given, which is component-major as all position-driven
+// Only positions at which some pair has a precinct are visited, and at
+// every position only the pairs anchored there, so the work is
+// proportional to the number of precincts.  Pairs are visited in the
+// order given, which is component-major as all position-driven
 // progressions require.
 func (t *Tile) yieldPositions(yield func(Packet) bool, v volume, ps []pair) bool {
 	if len(ps) == 0 {
@@ -241,34 +254,60 @@ func (t *Tile) yieldPositions(yield func(Packet) bool, v volume, ps []pair) bool
 		anchors[i] = t.anchorOf(p)
 	}
 	ys := t.anchorRows(anchors, int64(t.Bounds.Y1))
-	var xs []int64
-	var active []int
+	h := &anchorHeap{cursor: make([]int64, len(ps))}
+	var atX []int
 	for _, y := range ys {
-		active = active[:0]
+		h.idx = h.idx[:0]
 		for i, a := range anchors {
 			if y == a.yFirst || (y >= a.ySecond && y%a.ystep == 0) {
-				active = append(active, i)
+				h.cursor[i] = a.xFirst
+				h.idx = append(h.idx, i)
 			}
 		}
-		xs = xs[:0]
-		for _, i := range active {
-			a := anchors[i]
-			xs = append(xs, a.xFirst)
-			for x := a.xSecond; x < int64(t.Bounds.X1); x += a.xstep {
-				xs = append(xs, x)
+		heap.Init(h)
+		// visit the smallest next x; at that x the anchored pairs come out
+		// of the heap in their given order
+		for h.Len() > 0 {
+			x := h.cursor[h.idx[0]]
+			atX = atX[:0]
+			for h.Len() > 0 && h.cursor[h.idx[0]] == x {
+				atX = append(atX, heap.Pop(h).(int))
 			}
-		}
-		slices.Sort(xs)
-		xs = slices.Compact(xs)
-		for _, x := range xs {
-			for _, i := range active {
+			for _, i := range atX {
 				if !t.yieldPosition(yield, v, ps[i].c, ps[i].r, int(x), int(y)) {
 					return false
+				}
+				a := anchors[i]
+				next := max(a.xSecond, (x/a.xstep+1)*a.xstep)
+				if next < int64(t.Bounds.X1) {
+					h.cursor[i] = next
+					heap.Push(h, i)
 				}
 			}
 		}
 	}
 	return true
+}
+
+// anchorHeap orders active pairs by their next x anchor, then by pair
+// index, for the merge in yieldPositions.
+type anchorHeap struct {
+	cursor []int64
+	idx    []int
+}
+
+func (h *anchorHeap) Len() int { return len(h.idx) }
+func (h *anchorHeap) Less(a, b int) bool {
+	i, j := h.idx[a], h.idx[b]
+	return h.cursor[i] < h.cursor[j] || (h.cursor[i] == h.cursor[j] && i < j)
+}
+func (h *anchorHeap) Swap(a, b int) { h.idx[a], h.idx[b] = h.idx[b], h.idx[a] }
+func (h *anchorHeap) Push(x any)    { h.idx = append(h.idx, x.(int)) }
+func (h *anchorHeap) Pop() any {
+	n := len(h.idx) - 1
+	v := h.idx[n]
+	h.idx = h.idx[:n]
+	return v
 }
 
 // anchorRows returns the sorted distinct rows at which any of the

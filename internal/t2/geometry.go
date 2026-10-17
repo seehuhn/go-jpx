@@ -412,6 +412,9 @@ func newPrecinctBand(b *Band, pr Rect, level int, charge Charge) (*PrecinctBand,
 	}
 	pb := &PrecinctBand{Band: b, Bounds: br}
 	if br.Empty() {
+		if err := charge.charge(160); err != nil {
+			return nil, err
+		}
 		pb.Incl = NewTree(0, 0)
 		pb.ZeroBP = NewTree(0, 0)
 		return pb, nil

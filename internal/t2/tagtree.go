@@ -166,11 +166,16 @@ func (t *Tree) EncodeValue(w *BitWriter, x, y int) {
 	t.Encode(w, x, y, t.levels[0].nodes[y*t.levels[0].w+x].value+1)
 }
 
-// DecodeValue queries leaf (x,y) with thresholds 1, 2, 3, … until its
+// DecodeValue queries leaf (x,y) with increasing thresholds until its
 // value is known, and returns it.  It fails when the data runs out or
-// when the value would exceed maxValue.
+// when the value would exceed maxValue.  Thresholds below what the tree
+// already establishes as a lower bound would read nothing and are
+// skipped, so the cost is proportional to the bits consumed.
 func (t *Tree) DecodeValue(r *BitReader, x, y, maxValue int) (int, error) {
-	for th := 1; th <= maxValue+1; th++ {
+	if !t.inRange(x, y) {
+		return 0, errors.New("tag tree leaf out of range")
+	}
+	for th := t.lowerBound(x, y) + 1; th <= maxValue+1; th++ {
 		ok, err := t.Decode(r, x, y, th)
 		if err != nil {
 			return 0, err
@@ -180,4 +185,40 @@ func (t *Tree) DecodeValue(r *BitReader, x, y, maxValue int) (int, error) {
 		}
 	}
 	return 0, errors.New("tag tree value too large")
+}
+
+// lowerBound returns the largest lower bound established on the path
+// from the root to leaf (x,y), which bounds the leaf's value from below.
+func (t *Tree) lowerBound(x, y int) int {
+	low := 0
+	for i := len(t.levels) - 1; i >= 0; i-- {
+		l := &t.levels[i]
+		low = max(low, l.nodes[(y>>uint(i))*l.w+(x>>uint(i))].low)
+	}
+	return low
+}
+
+// SkipWidth reports how many leaves, starting at (x,y) and moving right
+// along the row, are already known to have values of at least threshold,
+// so that decoding them with this threshold would read no bits: the
+// width of the largest node on the path to (x,y) whose lower bound has
+// reached the threshold, clipped to the row.  Zero means the leaf must be
+// decoded.  Lower bounds are propagated downwards like Decode does, so a
+// subsequent Decode behaves identically.
+func (t *Tree) SkipWidth(x, y, threshold int) int {
+	if !t.inRange(x, y) {
+		return 0
+	}
+	low := 0
+	for i := len(t.levels) - 1; i >= 0; i-- {
+		l := &t.levels[i]
+		n := &l.nodes[(y>>uint(i))*l.w+(x>>uint(i))]
+		low = max(low, n.low)
+		n.low = low
+		if low >= threshold {
+			end := ((x >> uint(i)) + 1) << uint(i)
+			return min(end, t.levels[0].w) - x
+		}
+	}
+	return 0
 }

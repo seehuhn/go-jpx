@@ -31,15 +31,22 @@ const (
 const readChunk = 64 << 10
 
 // readAll reads r to the end, charging the budget as the data arrives.
+// Readers that know their remaining length get a single exact
+// allocation; others are read in growing steps.
 func readAll(r io.Reader, charge func(int) error) ([]byte, error) {
 	var buf []byte
+	if lr, ok := r.(interface{ Len() int }); ok {
+		n := lr.Len() + 1 // room for the final read to report EOF
+		if err := chargeOpt(charge, n); err != nil {
+			return nil, err
+		}
+		buf = make([]byte, 0, n)
+	}
 	for {
-		if cap(buf)-len(buf) < readChunk {
+		if len(buf) == cap(buf) {
 			grow := max(readChunk, cap(buf))
-			if charge != nil {
-				if err := charge(grow); err != nil {
-					return nil, err
-				}
+			if err := chargeOpt(charge, grow); err != nil {
+				return nil, err
 			}
 			nb := make([]byte, len(buf), cap(buf)+grow)
 			copy(nb, buf)
@@ -98,7 +105,7 @@ func Decode(r io.Reader, opt *Options) (*Image, error) {
 	if err := checkSupported(m); err != nil {
 		return nil, err
 	}
-	h, err := buildHeader(wrapper, m)
+	h, err := buildHeader(wrapper, m, charge)
 	if err != nil {
 		return nil, err
 	}

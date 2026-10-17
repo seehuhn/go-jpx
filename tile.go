@@ -236,10 +236,12 @@ func (d *tileDecoder) reconstruct(tile *t2.Tile, c int, tc *t2.TileComp) error {
 	}
 	w, h := r.X1-r.X0, r.Y1-r.Y0
 	n := w * h
+	rev := tc.Style.Reversible
 	if n == 0 {
+		// leave no stale samples from an earlier tile behind
+		d.ibuf[c], d.fbuf[c] = d.ibuf[c][:0], d.fbuf[c][:0]
 		return nil
 	}
-	rev := tc.Style.Reversible
 	if rev {
 		if cap(d.ibuf[c]) < n {
 			if err := d.chargeBytes(4 * n); err != nil {
@@ -317,6 +319,10 @@ func (d *tileDecoder) reconstruct(tile *t2.Tile, c int, tc *t2.TileComp) error {
 		}
 	}
 
+	// the transform keeps a scratch line of the longer side
+	if err := d.chargeBytes(4 * (w + h + 8)); err != nil {
+		return err
+	}
 	if rev {
 		dwt.Inverse53(d.ibuf[c], r, levels)
 	} else {
@@ -499,6 +505,9 @@ func (d *tileDecoder) inverseMCT(tile *t2.Tile) error {
 	}
 	if rev {
 		a, b, c := d.ibuf[0], d.ibuf[1], d.ibuf[2]
+		if len(a) != len(b) || len(a) != len(c) {
+			return errors.New("jpx: component transform on buffers of different size")
+		}
 		for i := range a {
 			y, u, v := a[i], b[i], c[i]
 			g := y - (u+v)>>2
@@ -508,6 +517,9 @@ func (d *tileDecoder) inverseMCT(tile *t2.Tile) error {
 		}
 	} else {
 		a, b, c := d.fbuf[0], d.fbuf[1], d.fbuf[2]
+		if len(a) != len(b) || len(a) != len(c) {
+			return errors.New("jpx: component transform on buffers of different size")
+		}
 		for i := range a {
 			y, cb, cr := a[i], b[i], c[i]
 			a[i] = y + 1.402*cr

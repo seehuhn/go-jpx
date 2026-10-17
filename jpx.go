@@ -182,8 +182,8 @@ type Image struct {
 
 // Options controls decoding.
 type Options struct {
-	// Budget bounds the working memory, including the decoded planes;
-	// only the copy of the input itself is exempt.  Every allocation
+	// Budget bounds the working memory, including the copy of the input
+	// and the decoded planes.  Every allocation
 	// whose size depends on the input is charged before it is made, and
 	// exceeding the budget aborts decoding with membudget.ErrExceeded.
 	// With a nil Budget the decoder limits itself to DefaultBudgetBase

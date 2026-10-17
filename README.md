@@ -87,8 +87,16 @@ an explicit budget.  Exceeding the budget fails with
 
 Work is bounded by the input as well: packets are only parsed while data
 is present, structures for precincts and code-blocks are created when
-their first packet arrives, and tiles are decoded one at a time into
-buffers that are reused.
+their first packet arrives, tag-tree walks and progression iterators do
+work in proportion to the bits consumed and the precincts present, and
+tiles are decoded one at a time into buffers that are reused.  Scans
+that a hostile file could multiply without supplying data (progression
+order changes) are charged to the budget like memory.
+
+`hostile_test.go` and `mutate_test.go` hold the regression suite from
+the security review: hand-built hostile codestreams and files, a random
+geometry generator, and header mutation, all asserting that decoding
+neither panics nor allocates more than it charges.
 
 ## Development
 

@@ -137,8 +137,13 @@ func toPNGImage(img *jpx.Image) (image.Image, error) {
 		return pic, nil
 	}
 
-	pic8 := image.NewNRGBA(rect)
-	pic16 := image.NewNRGBA64(rect)
+	var pic8 *image.NRGBA
+	var pic16 *image.NRGBA64
+	if wide {
+		pic16 = image.NewNRGBA64(rect)
+	} else {
+		pic8 = image.NewNRGBA(rect)
+	}
 	for y := range h {
 		for x := range w {
 			i := y*w + x

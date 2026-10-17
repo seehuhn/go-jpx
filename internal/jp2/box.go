@@ -135,7 +135,25 @@ type subBox struct {
 
 // splitBoxes splits the payload of a superbox into its child boxes.
 func splitBoxes(data []byte, charge func(int) error) ([]subBox, error) {
-	var res []subBox
+	// count the boxes first so that the result is allocated once
+	count := 0
+	for d := data; len(d) >= 8; count++ {
+		lbox := uint64(binary.BigEndian.Uint32(d))
+		switch {
+		case lbox == 0:
+			lbox = uint64(len(d))
+		case lbox == 1 && len(d) >= 16:
+			lbox = binary.BigEndian.Uint64(d[8:])
+		}
+		if lbox < 8 || lbox > uint64(len(d)) {
+			break
+		}
+		d = d[lbox:]
+	}
+	if err := charge(count * 48); err != nil {
+		return nil, err
+	}
+	res := make([]subBox, 0, count)
 	for len(data) > 0 {
 		if len(data) < 8 {
 			return nil, errTruncated
@@ -155,9 +173,6 @@ func splitBoxes(data []byte, charge func(int) error) ([]subBox, error) {
 		}
 		if lbox < hdr || lbox > uint64(len(data)) {
 			return nil, errors.New("jp2: box exceeds enclosing box")
-		}
-		if err := charge(48); err != nil {
-			return nil, err
 		}
 		res = append(res, subBox{typ, data[hdr:lbox]})
 		data = data[lbox:]

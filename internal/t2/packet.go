@@ -66,7 +66,7 @@ func (t *Tile) ReadPacket(pk Packet, hdr, body *Stream, pieces *[]Piece, charge 
 	}
 	if present != 0 {
 		for _, pb := range prec.Bands {
-			if err := t.readBandHeader(br, pb, pk.Layer, tc, pieces); err != nil {
+			if err := t.readBandHeader(br, pb, pk.Layer, tc, pieces, charge); err != nil {
 				return err
 			}
 		}
@@ -98,7 +98,7 @@ func (t *Tile) ReadPacket(pk Packet, hdr, body *Stream, pieces *[]Piece, charge 
 
 // readBandHeader decodes the header fields for the code-blocks of one
 // precinct-band.
-func (t *Tile) readBandHeader(br *BitReader, pb *PrecinctBand, layer int, tc *TileComp, pieces *[]Piece) error {
+func (t *Tile) readBandHeader(br *BitReader, pb *PrecinctBand, layer int, tc *TileComp, pieces *[]Piece, charge Charge) error {
 	style := t1.Style{
 		Bypass:      tc.Style.EntropyBypass,
 		Reset:       tc.Style.ResetContexts,
@@ -108,7 +108,7 @@ func (t *Tile) readBandHeader(br *BitReader, pb *PrecinctBand, layer int, tc *Ti
 		SegSymbols:  tc.Style.SegmentationSymbols,
 	}
 	for j := range pb.CBH {
-		for i := range pb.CBW {
+		for i := 0; i < pb.CBW; i++ {
 			cb := &pb.Blocks[j*pb.CBW+i]
 			var included bool
 			if cb.Included {
@@ -118,6 +118,13 @@ func (t *Tile) readBandHeader(br *BitReader, pb *PrecinctBand, layer int, tc *Ti
 				}
 				included = b != 0
 			} else {
+				// blocks under a tag tree node whose bound has reached the
+				// layer are not included and cost no bits; skip them
+				// together so that the work follows the bits read
+				if skip := pb.Incl.SkipWidth(i, j, layer+1); skip > 0 {
+					i += skip - 1
+					continue
+				}
 				ok, err := pb.Incl.Decode(br, i, j, layer+1)
 				if err != nil {
 					return err
@@ -176,6 +183,11 @@ func (t *Tile) readBandHeader(br *BitReader, pb *PrecinctBand, layer int, tc *Ti
 				if err != nil {
 					return err
 				}
+				if len(*pieces) == cap(*pieces) {
+					if err := charge.charge(32 * max(cap(*pieces), 16)); err != nil {
+						return err
+					}
+				}
 				*pieces = append(*pieces, Piece{cb: cb, length: int(length), passes: n, closes: term})
 				start = k + 1
 			}
@@ -224,15 +236,20 @@ func readPassCount(br *BitReader) (int, error) {
 func (cb *CodeBlock) addPiece(data []byte, passes int, closes bool, charge Charge) error {
 	n := len(cb.Segments)
 	if n == 0 || cb.Segments[n-1].Closed {
-		if err := charge.charge(64); err != nil {
-			return err
+		// slices grow by doubling; charge the growth, not the element
+		if n == cap(cb.Segments) {
+			if err := charge.charge(64 * max(n, 1)); err != nil {
+				return err
+			}
 		}
 		cb.Segments = append(cb.Segments, Segment{})
 		n++
 	}
 	seg := &cb.Segments[n-1]
-	if err := charge.charge(24); err != nil {
-		return err
+	if len(seg.Chunks) == cap(seg.Chunks) {
+		if err := charge.charge(24 * max(len(seg.Chunks), 1)); err != nil {
+			return err
+		}
 	}
 	seg.Chunks = append(seg.Chunks, data)
 	seg.Passes += passes

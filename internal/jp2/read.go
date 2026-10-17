@@ -45,10 +45,11 @@ func Read(r io.Reader, charge func(n int) error) (*Header, io.Reader, error) {
 	n, err := io.ReadFull(r, first)
 	first = first[:n]
 	if n >= 4 && first[0] == 0xFF && first[1] == 0x4F && first[2] == 0xFF && first[3] == 0x51 {
-		// a bare codestream; hand back the whole input, rewinding when
-		// possible so that callers can recognise their own reader
+		// a bare codestream; hand back the input from where it started,
+		// rewinding when possible so that callers can recognise their own
+		// reader
 		if s, ok := r.(io.Seeker); ok {
-			if _, err := s.Seek(0, io.SeekStart); err == nil {
+			if _, err := s.Seek(-int64(n), io.SeekCurrent); err == nil {
 				return &Header{}, r, nil
 			}
 		}
@@ -135,6 +136,29 @@ func tolerate(err error) error {
 	return err
 }
 
+// inputSize determines the total size of the input behind r, through a
+// Size method or by seeking to the end and back.
+func inputSize(r io.Reader) (int64, error) {
+	if sr, ok := r.(interface{ Size() int64 }); ok {
+		return sr.Size(), nil
+	}
+	if s, ok := r.(io.Seeker); ok {
+		cur, err := s.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return 0, err
+		}
+		end, err := s.Seek(0, io.SeekEnd)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := s.Seek(cur, io.SeekStart); err != nil {
+			return 0, err
+		}
+		return end, nil
+	}
+	return 0, errors.New("jp2: fragment table requires an input of known size")
+}
+
 // fragmentReader builds a reader that concatenates the fragments listed
 // in a fragment table box.  Fragment offsets are absolute positions in
 // r's [io.ReaderAt] view, so the caller must pass a reader whose origin is
@@ -168,12 +192,13 @@ func fragmentReader(r io.Reader, ftbl []byte, charge func(int) error) (io.Reader
 		if err := charge(nf * 64); err != nil {
 			return nil, err
 		}
-		// when the size of the input is known, every fragment must lie
-		// inside it and the fragments together must not exceed it, so
-		// that the codestream cannot be larger than the file
-		size := int64(-1)
-		if sr, ok := r.(interface{ Size() int64 }); ok {
-			size = sr.Size()
+		// Every fragment must lie inside the input and the fragments
+		// together must not exceed it, so that the codestream cannot be
+		// larger than the file; without a way to learn the size of the
+		// input the table cannot be checked and is rejected.
+		size, err := inputSize(r)
+		if err != nil {
+			return nil, err
 		}
 		var parts []io.Reader
 		var covered int64
@@ -188,14 +213,12 @@ func fragmentReader(r io.Reader, ftbl []byte, charge func(int) error) (io.Reader
 			if off > math.MaxInt64-math.MaxUint32 {
 				return nil, errors.New("jp2: invalid fragment offset")
 			}
-			if size >= 0 {
-				if int64(off)+int64(length) > size {
-					return nil, errors.New("jp2: fragment beyond the end of the file")
-				}
-				covered += int64(length)
-				if covered > size {
-					return nil, errors.New("jp2: fragments larger than the file")
-				}
+			if int64(off)+int64(length) > size {
+				return nil, errors.New("jp2: fragment beyond the end of the file")
+			}
+			covered += int64(length)
+			if covered > size {
+				return nil, errors.New("jp2: fragments larger than the file")
 			}
 			parts = append(parts, io.NewSectionReader(ra, int64(off), int64(length)))
 		}

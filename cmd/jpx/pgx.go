@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strings"
 
@@ -48,7 +49,7 @@ func readPGX(r io.Reader) (jpx.Component, jpx.Plane, error) {
 	if _, err := fmt.Sscan(f[3]+" "+f[4]+" "+f[5], &c.Depth, &w, &h); err != nil {
 		return c, p, errors.New("invalid PGX header")
 	}
-	if c.Depth < 1 || c.Depth > jpx.MaxEncodeDepth || w < 1 || h < 1 {
+	if c.Depth < 1 || c.Depth > jpx.MaxEncodeDepth || w < 1 || h < 1 || h > math.MaxInt32/w {
 		return c, p, errors.New("invalid PGX header")
 	}
 	c.Signed = f[2] == "-"

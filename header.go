@@ -32,12 +32,12 @@ func ReadHeader(r io.Reader, budget *membudget.Budget) (*Header, error) {
 	if err != nil {
 		return nil, err
 	}
-	return buildHeader(wrapper, main)
+	return buildHeader(wrapper, main, charge)
 }
 
 // buildHeader combines the JP2 wrapper information and the codestream
 // main header into the public Header.
-func buildHeader(w *jp2.Header, m *codestream.MainHeader) (*Header, error) {
+func buildHeader(w *jp2.Header, m *codestream.MainHeader, charge func(int) error) (*Header, error) {
 	siz := &m.SIZ
 	h := &Header{
 		Width:   int(siz.Xsiz - siz.XOsiz),
@@ -49,6 +49,16 @@ func buildHeader(w *jp2.Header, m *codestream.MainHeader) (*Header, error) {
 		return nil, errors.New("jpx: invalid tile geometry")
 	}
 	h.Tiles = nx * ny
+
+	// the header's slices are sized by the boxes and marker segments
+	// read, and charged like them
+	numChannels := len(siz.Components)
+	if len(w.ComponentMap) > 0 {
+		numChannels = max(numChannels, len(w.ComponentMap))
+	}
+	if err := chargeOpt(charge, 64*len(siz.Components)+48*numChannels+128*len(w.Colors)+256); err != nil {
+		return nil, err
+	}
 
 	h.Components = make([]Component, len(siz.Components))
 	for i, c := range siz.Components {
@@ -69,6 +79,9 @@ func buildHeader(w *jp2.Header, m *codestream.MainHeader) (*Header, error) {
 		}
 	}
 
+	if len(w.Colors) > 0 {
+		h.ColorSpecs = make([]ColorSpec, 0, len(w.Colors))
+	}
 	for _, cs := range w.Colors {
 		h.ColorSpecs = append(h.ColorSpecs, ColorSpec{
 			Method:     int(cs.Method),
@@ -114,8 +127,9 @@ func validMapping(w *jp2.Header, numComps int) bool {
 // buildChannels derives the channel list from the component mapping and
 // channel definition boxes, synthesising defaults where they are absent.
 func buildChannels(w *jp2.Header, h *Header) []Channel {
-	var channels []Channel
+	channels := make([]Channel, 0, len(h.Components))
 	if h.Palette != nil {
+		channels = make([]Channel, 0, len(w.ComponentMap))
 		for _, cm := range w.ComponentMap {
 			ch := Channel{Component: int(cm.Component), PaletteColumn: -1}
 			if cm.MappingType == 1 {
