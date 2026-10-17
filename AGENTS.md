@@ -38,6 +38,12 @@ editing.
    `Co-Authored-By: Claude <noreply@anthropic.com>`.  No session links, no
    tool names in messages.  Commit in meaningful units; the tree must build
    and pass tests at every commit.
+7. **Adversarial review before every commit.**  Nothing is committed until
+   an independent reviewer (a separate sub-agent, see below) has tried to
+   break the change: wrong spec interpretation, hostile-input paths
+   (panics, unbounded work, allocation from declared sizes), contract
+   gaps between packages, missing tests, style violations.  Every finding
+   is fixed or explicitly rebutted before the commit.
 
 ## Module layout
 
@@ -172,3 +178,8 @@ Sonnet for self-contained components with a clear specification,
 the lead model for cross-cutting design, EBCOT/tier-2, rate control and
 debugging.  The lead reviews every result before committing.  Sub-agents
 must follow this file; it is loaded automatically.
+
+Review step: `~/briefs/review.sh <name>` hands the staged diff to a
+reviewer agent whose only job is to find faults (it does not edit).  Its
+report is read by the lead, who fixes the valid findings, re-runs the
+tests and only then commits.

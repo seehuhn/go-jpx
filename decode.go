@@ -1,0 +1,216 @@
+// Copyright 2026 Jochen Voss <voss@seehuhn.de>
+// SPDX-License-Identifier: BSD-3-Clause
+
+package jpx
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"maps"
+	"math"
+	"slices"
+
+	"seehuhn.de/go/jpx/internal/codestream"
+	"seehuhn.de/go/jpx/internal/jp2"
+)
+
+// The default memory budget for callers that do not supply one is a
+// fixed allowance plus a multiple of the input size.
+const (
+	DefaultBudgetBase    = 64 << 20
+	DefaultBudgetPerByte = 256
+)
+
+// readChunk is the unit in which input is read, so that the budget is
+// charged before memory is used.
+const readChunk = 64 << 10
+
+type simpleBudget struct{ left int64 }
+
+func (b *simpleBudget) Charge(n int) error {
+	if n < 0 {
+		return errors.New("jpx: negative allocation")
+	}
+	if int64(n) > b.left {
+		return ErrBudget
+	}
+	b.left -= int64(n)
+	return nil
+}
+
+// ErrBudget is returned when decoding would exceed the memory budget.
+var ErrBudget = errors.New("jpx: memory budget exceeded")
+
+// readAll reads r to the end, charging the budget as the data arrives.
+func readAll(r io.Reader, charge func(int) error) ([]byte, error) {
+	var buf []byte
+	for {
+		if cap(buf)-len(buf) < readChunk {
+			grow := max(readChunk, cap(buf))
+			if charge != nil {
+				if err := charge(grow); err != nil {
+					return nil, err
+				}
+			}
+			nb := make([]byte, len(buf), cap(buf)+grow)
+			copy(nb, buf)
+			buf = nb
+		}
+		n, err := r.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if err == io.EOF {
+			return buf, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
+// Decode reads a JPEG 2000 image from r.  Truncated or partially corrupt
+// codestreams produce the image decoded so far; an error is returned
+// only when the data cannot be interpreted at all or when a limit is
+// exceeded.
+func Decode(r io.Reader, opt *Options) (*Image, error) {
+	if opt == nil {
+		opt = &Options{}
+	}
+	if opt.Reduce < 0 {
+		return nil, errors.New("jpx: negative reduction")
+	}
+
+	// The input is read first.  Without a caller-supplied budget the
+	// decoder limits itself to a fixed allowance plus a multiple of the
+	// input size, so that small hostile files cannot exhaust memory.
+	var charge func(int) error
+	var data []byte
+	if opt.Budget != nil {
+		charge = opt.Budget.Charge
+		var err error
+		data, err = readAll(r, charge)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		var err error
+		data, err = readAll(r, nil)
+		if err != nil {
+			return nil, err
+		}
+		b := &simpleBudget{left: DefaultBudgetBase + DefaultBudgetPerByte*int64(len(data))}
+		charge = b.Charge
+	}
+
+	wrapper, csr, err := jp2.Read(bytes.NewReader(data), charge)
+	if err != nil {
+		return nil, err
+	}
+	var cs []byte
+	if !wrapper.HasWrapper {
+		cs = data
+	} else if cs, err = readAll(csr, charge); err != nil {
+		return nil, err
+	}
+
+	cr := codestream.NewReader(cs, charge)
+	m, err := cr.ReadMainHeader()
+	if err != nil {
+		return nil, err
+	}
+	if err := checkSupported(m); err != nil {
+		return nil, err
+	}
+	h, err := buildHeader(wrapper, m)
+	if err != nil {
+		return nil, err
+	}
+	if opt.Reduce >= h.Resolutions {
+		return nil, fmt.Errorf("jpx: cannot discard %d of %d resolution levels", opt.Reduce, h.Resolutions)
+	}
+
+	img := &Image{Header: *h, Reduce: opt.Reduce}
+	if err := img.allocPlanes(m, charge); err != nil {
+		return nil, err
+	}
+
+	// Collect the tile-parts of every tile.  Tile-parts of one tile may
+	// be interleaved with those of other tiles; they must be decoded in
+	// order and together.
+	parts, err := collectTileParts(cr, h.Tiles, charge)
+	if err != nil {
+		return nil, err
+	}
+
+	dec := newTileDecoder(m, img, charge)
+	for _, idx := range slices.Sorted(maps.Keys(parts)) {
+		if err := dec.decodeTile(idx, parts[idx]); err != nil {
+			return nil, err
+		}
+	}
+	return img, nil
+}
+
+// allocPlanes creates the output planes at the requested reduction.
+func (img *Image) allocPlanes(m *codestream.MainHeader, charge func(int) error) error {
+	siz := &m.SIZ
+	img.Planes = make([]Plane, len(siz.Components))
+	for c, cs := range siz.Components {
+		x0 := ceilShift(ceilDiv(int(siz.XOsiz), cs.XRsiz), img.Reduce)
+		x1 := ceilShift(ceilDiv(int(siz.Xsiz), cs.XRsiz), img.Reduce)
+		y0 := ceilShift(ceilDiv(int(siz.YOsiz), cs.YRsiz), img.Reduce)
+		y1 := ceilShift(ceilDiv(int(siz.Ysiz), cs.YRsiz), img.Reduce)
+		w, h := x1-x0, y1-y0
+		if w < 0 || h < 0 || (w > 0 && h > math.MaxInt/8/w) {
+			return errors.New("jpx: image too large")
+		}
+		n := w * h
+		if charge != nil {
+			if err := charge(n * 4); err != nil {
+				return err
+			}
+		}
+		img.Planes[c] = Plane{Width: w, Height: h, Pix: make([]int32, n)}
+	}
+	return nil
+}
+
+// tilePart is a tile-part together with its position in the codestream,
+// which selects its packed packet headers when PPM is used.
+type tilePart struct {
+	*codestream.TilePart
+	seq int
+}
+
+// collectTileParts reads all tile-part headers and groups the tile-parts
+// by tile index, preserving their order.
+func collectTileParts(cr *codestream.Reader, numTiles int, charge func(int) error) (map[int][]tilePart, error) {
+	parts := make(map[int][]tilePart)
+	for seq := 0; ; seq++ {
+		tp, err := cr.NextTilePart()
+		if err != nil {
+			// a damaged tile-part header ends what can be interpreted
+			if len(parts) > 0 {
+				return parts, nil
+			}
+			return nil, err
+		}
+		if tp == nil {
+			return parts, nil
+		}
+		if tp.Index >= numTiles {
+			// a tile-part for a tile that does not exist ends what can
+			// be interpreted
+			return parts, nil
+		}
+		if charge != nil {
+			if err := charge(256); err != nil {
+				return nil, err
+			}
+		}
+		parts[tp.Index] = append(parts[tp.Index], tilePart{tp, seq})
+	}
+}
+
+func ceilShift(a, s int) int { return (a + (1 << uint(s)) - 1) >> uint(s) }
