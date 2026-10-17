@@ -93,8 +93,9 @@ func (h *MainHeader) PackedHeaders(charge func(int) error) ([][]byte, error) {
 }
 
 // PackedHeaders returns the concatenated PPT data of the tile-part in Z
-// order, or nil if there is none.  It fails if a Zppt index is missing or
-// duplicated.  If charge is not nil, it is called with the size of every
+// order, or nil if there is none.  Indices need not start at zero, since
+// encoders number the segments either per tile-part or across the
+// tile-parts of a tile; a duplicated index is an error.  If charge is not nil, it is called with the size of every
 // allocation before the allocation is made.
 func (t *TilePart) PackedHeaders(charge func(int) error) ([]byte, error) {
 	if len(t.PPT) == 0 {
@@ -105,9 +106,12 @@ func (t *TilePart) PackedHeaders(charge func(int) error) ([]byte, error) {
 		return nil, err
 	}
 	total := 0
+	// Encoders either restart the index in every tile-part or continue
+	// counting across the tile-parts of a tile; only duplicates within one
+	// tile-part header are rejected.
 	for i, s := range segs {
-		if s.Z != i {
-			return nil, fmt.Errorf("PPT segment %d missing or duplicated", i)
+		if i > 0 && s.Z == segs[i-1].Z {
+			return nil, fmt.Errorf("duplicate PPT segment %d", s.Z)
 		}
 		total += len(s.Data)
 	}

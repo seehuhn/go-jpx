@@ -548,9 +548,11 @@ func TestPackedHeadersPPM(t *testing.T) {
 	if got, err := (&TilePart{}).PackedHeaders(nil); got != nil || err != nil {
 		t.Error("expected nil without PPT")
 	}
-	tp := &TilePart{PPT: []PPTSegment{{0, []byte("a")}, {2, []byte("c")}}}
-	if _, err := tp.PackedHeaders(nil); err == nil {
-		t.Error("PPT gap accepted")
+	// indices need not start at zero or be contiguous, since encoders
+	// number PPT segments across tile-parts; they are sorted
+	tp := &TilePart{PPT: []PPTSegment{{5, []byte("c")}, {3, []byte("a")}}}
+	if got, err := tp.PackedHeaders(nil); err != nil || string(got) != "ac" {
+		t.Errorf("sorted PPT segments: got %q, %v", got, err)
 	}
 	tp = &TilePart{PPT: []PPTSegment{{0, []byte("a")}, {0, []byte("b")}}}
 	if _, err := tp.PackedHeaders(nil); err == nil {

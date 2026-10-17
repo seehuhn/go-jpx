@@ -43,15 +43,11 @@ type EncodedBlock struct {
 // Encoder encodes code-blocks.  It keeps its working buffers between
 // calls.
 type Encoder struct {
-	w, h   int
-	stride int
-	state  []uint8
-	mag    []uint32 // coefficient magnitudes
-	ctx    contexts
-	mq     *mq.Encoder
-	raw    rawWriter
-	band   Band
-	causal bool
+	blockState
+	mag []uint32 // coefficient magnitudes
+	ctx contexts
+	mq  *mq.Encoder
+	raw rawWriter
 
 	// per-call results
 	data   []byte
@@ -77,10 +73,16 @@ func (e *Encoder) Encode(in []int32, w, h int, band Band, style Style, planes in
 		return nil, errors.New("t1: too many bit-planes")
 	}
 	e.setup(w, h, band, style.Causal)
+	if cap(e.mag) < w*h {
+		e.mag = make([]uint32, w*h)
+	} else {
+		e.mag = e.mag[:w*h]
+	}
+	e.ctx.reset()
 
 	var maxMag uint32
 	for y := range h {
-		row := e.state[(y+1)*e.stride+1:]
+		row := e.st[(y+1)*e.stride+1:]
 		for x := range w {
 			v := in[y*w+x]
 			if v < 0 {
@@ -192,28 +194,6 @@ func (e *Encoder) pendingLen(isRaw bool) int {
 	return e.mq.Len() + 5
 }
 
-func (e *Encoder) setup(w, h int, band Band, causal bool) {
-	e.w, e.h, e.band, e.causal = w, h, band, causal
-	e.stride = w + 2
-	n := e.stride * (h + 2)
-	if cap(e.state) < n {
-		e.state = make([]uint8, n)
-	} else {
-		e.state = e.state[:n]
-		clear(e.state)
-	}
-	if cap(e.mag) < w*h {
-		e.mag = make([]uint32, w*h)
-	} else {
-		e.mag = e.mag[:w*h]
-	}
-	e.ctx.reset()
-}
-
-func (e *Encoder) useBelow(y int) bool {
-	return !e.causal || y&3 != 3
-}
-
 // bit returns bit p of the magnitude of coefficient k.
 func (e *Encoder) bit(k, p int) int {
 	return int(e.mag[k]>>uint(p)) & 1
@@ -248,42 +228,35 @@ func (e *Encoder) refDist(k, p int) float64 {
 	return (fm-before)*(fm-before) - (fm-after)*(fm-after)
 }
 
-// encodeSign codes the sign of the coefficient at state index i.
-func (e *Encoder) encodeSign(i int, below bool) {
-	st := e.state
-	hc := contribution(signState(st[i-1]), signState(st[i+1]))
-	dn := 0
-	if below {
-		dn = signState(st[i+e.stride])
+// becomeSignificant codes the sign of the coefficient at state index i
+// in row y and marks it significant at plane p.
+func (e *Encoder) becomeSignificant(i, y, k, p int) {
+	neg := e.st[i]&stNeg != 0
+	ctx, xor := e.signContext(i, y)
+	bit := 0
+	if neg {
+		bit = 1
 	}
-	vc := contribution(signState(st[i-e.stride]), dn)
-	t := &scTable[hc+1][vc+1]
-	neg := int(st[i]&stNeg) >> 1
-	e.mq.Encode(&e.ctx[cxSC+t.ctx], neg^int(t.xor))
+	e.mq.Encode(&e.ctx[cxSC+ctx], bit^int(xor))
+	e.setSignificant(i, y, neg)
+	e.dist += e.sigDist(k, p)
 }
 
 func (e *Encoder) sigPass(p int) {
-	w, h, st := e.w, e.h, e.state
+	w, h, st, nb := e.w, e.h, e.st, e.nb
 	for y0 := 0; y0 < h; y0 += 4 {
 		y1 := min(y0+4, h)
 		for x := range w {
 			for y := y0; y < y1; y++ {
-				i := (y+1)*e.stride + x + 1
-				if st[i]&stSig != 0 {
-					continue
-				}
-				below := e.useBelow(y)
-				label := zcLabel(st, i, e.stride, e.band, below)
-				if label == 0 {
+				i := e.index(x, y)
+				if st[i]&stSig != 0 || nb[i] == 0 {
 					continue
 				}
 				k := y*w + x
 				b := e.bit(k, p)
-				e.mq.Encode(&e.ctx[cxZC+label], b)
+				e.mq.Encode(&e.ctx[cxZC+e.lut[nb[i]]], b)
 				if b != 0 {
-					st[i] |= stSig
-					e.encodeSign(i, below)
-					e.dist += e.sigDist(k, p)
+					e.becomeSignificant(i, y, k, p)
 				}
 				st[i] |= stVisited
 			}
@@ -292,24 +265,22 @@ func (e *Encoder) sigPass(p int) {
 }
 
 func (e *Encoder) sigPassRaw(p int) {
-	w, h, st := e.w, e.h, e.state
+	w, h, st, nb := e.w, e.h, e.st, e.nb
 	for y0 := 0; y0 < h; y0 += 4 {
 		y1 := min(y0+4, h)
 		for x := range w {
 			for y := y0; y < y1; y++ {
-				i := (y+1)*e.stride + x + 1
-				if st[i]&stSig != 0 {
-					continue
-				}
-				if zcLabel(st, i, e.stride, e.band, e.useBelow(y)) == 0 {
+				i := e.index(x, y)
+				if st[i]&stSig != 0 || nb[i] == 0 {
 					continue
 				}
 				k := y*w + x
 				b := e.bit(k, p)
 				e.raw.writeBit(b)
 				if b != 0 {
-					st[i] |= stSig
+					neg := st[i]&stNeg != 0
 					e.raw.writeBit(int(st[i]&stNeg) >> 1)
+					e.setSignificant(i, y, neg)
 					e.dist += e.sigDist(k, p)
 				}
 				st[i] |= stVisited
@@ -319,19 +290,19 @@ func (e *Encoder) sigPassRaw(p int) {
 }
 
 func (e *Encoder) refPass(p int) {
-	w, h, st := e.w, e.h, e.state
+	w, h, st, nb := e.w, e.h, e.st, e.nb
 	for y0 := 0; y0 < h; y0 += 4 {
 		y1 := min(y0+4, h)
 		for x := range w {
 			for y := y0; y < y1; y++ {
-				i := (y+1)*e.stride + x + 1
+				i := e.index(x, y)
 				if st[i]&(stSig|stVisited) != stSig {
 					continue
 				}
 				var cx *mq.Context
 				if st[i]&stRefined != 0 {
 					cx = &e.ctx[cxMR+2]
-				} else if zcLabel(st, i, e.stride, e.band, e.useBelow(y)) != 0 {
+				} else if nb[i] != 0 {
 					cx = &e.ctx[cxMR+1]
 				} else {
 					cx = &e.ctx[cxMR]
@@ -346,12 +317,12 @@ func (e *Encoder) refPass(p int) {
 }
 
 func (e *Encoder) refPassRaw(p int) {
-	w, h, st := e.w, e.h, e.state
+	w, h, st := e.w, e.h, e.st
 	for y0 := 0; y0 < h; y0 += 4 {
 		y1 := min(y0+4, h)
 		for x := range w {
 			for y := y0; y < y1; y++ {
-				i := (y+1)*e.stride + x + 1
+				i := e.index(x, y)
 				if st[i]&(stSig|stVisited) != stSig {
 					continue
 				}
@@ -365,12 +336,13 @@ func (e *Encoder) refPassRaw(p int) {
 }
 
 func (e *Encoder) cleanPass(p int) {
-	w, h, st := e.w, e.h, e.state
+	w, h, st, nb := e.w, e.h, e.st, e.nb
 	for y0 := 0; y0 < h; y0 += 4 {
 		y1 := min(y0+4, h)
 		for x := range w {
 			y := y0
-			if y1-y0 == 4 && e.runLengthApplies(x, y0) {
+			i := e.index(x, y0)
+			if y1-y0 == 4 && e.runLengthApplies(i) {
 				// find the first coefficient of the column with bit p set
 				k := 0
 				for k < 4 && e.bit((y0+k)*w+x, p) == 0 {
@@ -384,14 +356,12 @@ func (e *Encoder) cleanPass(p int) {
 				e.mq.Encode(&e.ctx[cxUNI], k>>1)
 				e.mq.Encode(&e.ctx[cxUNI], k&1)
 				y = y0 + k
-				i := (y+1)*e.stride + x + 1
-				st[i] |= stSig
-				e.encodeSign(i, e.useBelow(y))
-				e.dist += e.sigDist(y*w+x, p)
+				i += k * e.stride
+				e.becomeSignificant(i, y, y*w+x, p)
 				y++
+				i += e.stride
 			}
-			for ; y < y1; y++ {
-				i := (y+1)*e.stride + x + 1
+			for ; y < y1; y, i = y+1, i+e.stride {
 				if st[i]&stVisited != 0 {
 					st[i] &^= stVisited
 					continue
@@ -399,33 +369,15 @@ func (e *Encoder) cleanPass(p int) {
 				if st[i]&stSig != 0 {
 					continue
 				}
-				below := e.useBelow(y)
-				label := zcLabel(st, i, e.stride, e.band, below)
 				k := y*w + x
 				b := e.bit(k, p)
-				e.mq.Encode(&e.ctx[cxZC+label], b)
+				e.mq.Encode(&e.ctx[cxZC+e.lut[nb[i]]], b)
 				if b != 0 {
-					st[i] |= stSig
-					e.encodeSign(i, below)
-					e.dist += e.sigDist(k, p)
+					e.becomeSignificant(i, y, k, p)
 				}
 			}
 		}
 	}
-}
-
-func (e *Encoder) runLengthApplies(x, y0 int) bool {
-	st := e.state
-	for y := y0; y < y0+4; y++ {
-		i := (y+1)*e.stride + x + 1
-		if st[i]&(stSig|stVisited) != 0 {
-			return false
-		}
-		if zcLabel(st, i, e.stride, e.band, e.useBelow(y)) != 0 {
-			return false
-		}
-	}
-	return true
 }
 
 // encodeSegSymbol codes the segmentation symbol 1010.

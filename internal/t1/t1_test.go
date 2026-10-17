@@ -320,3 +320,47 @@ func BenchmarkEncode(b *testing.B) {
 		}
 	}
 }
+
+// The incrementally maintained neighbourhood counts must agree with a
+// direct count over the eight neighbours, in both context formation
+// modes.
+func TestNeighbourhoodCounts(t *testing.T) {
+	rng := rand.New(rand.NewPCG(15, 16))
+	for _, causal := range []bool{false, true} {
+		for range 50 {
+			w, h := 1+rng.IntN(20), 1+rng.IntN(20)
+			var s blockState
+			s.setup(w, h, BandLL, causal)
+			sig := make([]bool, w*h)
+			for range w * h / 2 {
+				x, y := rng.IntN(w), rng.IntN(h)
+				if sig[y*w+x] {
+					continue
+				}
+				sig[y*w+x] = true
+				s.setSignificant(s.index(x, y), y, rng.IntN(2) == 0)
+			}
+			at := func(x, y, cy int) int {
+				// neighbour (x, y) as seen from a coefficient in row cy
+				if x < 0 || y < 0 || x >= w || y >= h || !sig[y*w+x] {
+					return 0
+				}
+				if causal && y == cy+1 && cy&3 == 3 {
+					return 0
+				}
+				return 1
+			}
+			for y := range h {
+				for x := range w {
+					hc := at(x-1, y, y) + at(x+1, y, y)
+					vc := at(x, y-1, y) + at(x, y+1, y)
+					dc := at(x-1, y-1, y) + at(x+1, y-1, y) + at(x-1, y+1, y) + at(x+1, y+1, y)
+					want := uint8(hc | vc<<2 | dc<<4)
+					if got := s.nb[s.index(x, y)]; got != want {
+						t.Fatalf("causal=%v (%d,%d): counts %#x, want %#x", causal, x, y, got, want)
+					}
+				}
+			}
+		}
+	}
+}

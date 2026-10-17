@@ -22,9 +22,8 @@ type tileData struct {
 	zero [][][][][]int
 }
 
-// encodeTile encodes tile idx and returns the packet data of its single
-// tile-part.
-func (e *encoder) encodeTile(idx int) ([]byte, error) {
+// encodeTile encodes tile idx and returns its tile-parts.
+func (e *encoder) encodeTile(idx int) ([]tilePartData, error) {
 	tp := &codestream.TilePart{Index: idx, PartCount: 1}
 	tile, err := t2.NewTile(e.main, []*codestream.TilePart{tp}, idx, t2.Charge(e.charge))
 	if err != nil {
@@ -65,18 +64,42 @@ func (e *encoder) encodeTile(idx int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []byte
-	n := 0
+	// write every packet, then distribute the packets over the tile-parts
+	type packet struct{ hdr, body []byte }
+	var packets []packet
 	for pk := range seq {
 		c := pk.Comp.Index
 		prec := pk.Res.Precincts[pk.Precinct]
-		out = tile.WritePacket(out, pk.Comp, prec, td.enc[c][pk.Res.Level][pk.Precinct], pk.Layer, n)
-		n++
+		hdr, body := tile.WritePacket(nil, nil, pk.Comp, prec, td.enc[c][pk.Res.Level][pk.Precinct], pk.Layer)
+		if err := chargeOpt(e.charge, len(hdr)+len(body)+48); err != nil {
+			return nil, err
+		}
+		packets = append(packets, packet{hdr, body})
 	}
-	if len(out) > math.MaxUint32-64 {
-		return nil, errors.New("jpx: tile too large")
+	if len(tile.POC) > 0 && len(packets) != tile.NumPackets() {
+		return nil, errors.New("jpx: progression order changes do not cover all packets")
 	}
-	return out, nil
+	numParts := max(e.p.TileParts, 1)
+	if len(packets) == 0 {
+		numParts = 1
+	}
+	numParts = min(numParts, max(len(packets), 1))
+	parts := make([]tilePartData, numParts)
+	inline := e.p.PackedHeaders == HeadersInline
+	for i, pk := range packets {
+		part := &parts[i*numParts/len(packets)]
+		if tile.SOP {
+			part.body = append(part.body, t2.SOPMarker(i)...)
+		}
+		if inline {
+			part.body = append(part.body, pk.hdr...)
+		} else {
+			part.headers = append(part.headers, pk.hdr...)
+			part.headerLens = append(part.headerLens, len(pk.hdr))
+		}
+		part.body = append(part.body, pk.body...)
+	}
+	return parts, nil
 }
 
 // sampleBuffer holds the samples of one tile-component, as integers for

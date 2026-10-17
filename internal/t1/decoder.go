@@ -38,26 +38,14 @@ type Segment struct {
 	Passes int
 }
 
-// Per-coefficient state bits.
-const (
-	stSig     = 1 << iota // coefficient is significant
-	stNeg                 // coefficient is negative
-	stVisited             // coded in the significance pass of the current plane
-	stRefined             // has been refined at least once
-)
-
 // Decoder decodes code-blocks.  It keeps its working buffers between
 // calls so that decoding many blocks does not allocate.
 type Decoder struct {
-	w, h   int
-	stride int     // w + 2, the state array has a one-coefficient border
-	state  []uint8 // (w+2)*(h+2)
-	mag    []uint32
-	ctx    contexts
-	mq     mq.Decoder
-	raw    rawReader
-	band   Band
-	causal bool
+	blockState
+	mag []uint32
+	ctx contexts
+	mq  mq.Decoder
+	raw rawReader
 }
 
 // NewDecoder returns a decoder with empty buffers.
@@ -79,6 +67,13 @@ func (d *Decoder) Decode(out []int32, w, h int, band Band, style Style, planes i
 		return errors.New("t1: too many bit-planes")
 	}
 	d.setup(w, h, band, style.Causal)
+	if cap(d.mag) < w*h {
+		d.mag = make([]uint32, w*h)
+	} else {
+		d.mag = d.mag[:w*h]
+		clear(d.mag)
+	}
+	d.ctx.reset()
 
 	if planes <= 0 {
 		clear(out[:w*h])
@@ -130,7 +125,7 @@ func (d *Decoder) Decode(out []int32, w, h int, band Band, style Style, planes i
 	}
 
 	for y := range h {
-		row := d.state[(y+1)*d.stride+1:]
+		row := d.st[(y+1)*d.stride+1:]
 		for x := range w {
 			v := int32(d.mag[y*w+x])
 			if row[x]&stNeg != 0 {
@@ -142,94 +137,28 @@ func (d *Decoder) Decode(out []int32, w, h int, band Band, style Style, planes i
 	return nil
 }
 
-func (d *Decoder) setup(w, h int, band Band, causal bool) {
-	d.w, d.h, d.band, d.causal = w, h, band, causal
-	d.stride = w + 2
-	n := d.stride * (h + 2)
-	if cap(d.state) < n {
-		d.state = make([]uint8, n)
-	} else {
-		d.state = d.state[:n]
-		clear(d.state)
-	}
-	if cap(d.mag) < w*h {
-		d.mag = make([]uint32, w*h)
-	} else {
-		d.mag = d.mag[:w*h]
-		clear(d.mag)
-	}
-	d.ctx.reset()
-}
-
-// zcLabel computes the significance context label from the eight
-// neighbours of state index i.
-func zcLabel(st []uint8, i, stride int, band Band, below bool) uint8 {
-	h := int(st[i-1]&stSig) + int(st[i+1]&stSig)
-	up := i - stride
-	v := int(st[up] & stSig)
-	dg := int(st[up-1]&stSig) + int(st[up+1]&stSig)
-	if below {
-		dn := i + stride
-		v += int(st[dn] & stSig)
-		dg += int(st[dn-1]&stSig) + int(st[dn+1]&stSig)
-	}
-	return zcTable[band][zcIndex(h, v, dg)]
-}
-
-// signState converts a neighbour's state into -1, 0 or +1.
-func signState(s uint8) int {
-	if s&stSig == 0 {
-		return 0
-	}
-	if s&stNeg != 0 {
-		return -1
-	}
-	return 1
-}
-
-// decodeSign decodes the sign of the coefficient at state index i and
-// returns the state bits to set (stSig, possibly with stNeg).
-func (d *Decoder) decodeSign(i int, below bool) uint8 {
-	st := d.state
-	hc := contribution(signState(st[i-1]), signState(st[i+1]))
-	dn := 0
-	if below {
-		dn = signState(st[i+d.stride])
-	}
-	vc := contribution(signState(st[i-d.stride]), dn)
-	e := &scTable[hc+1][vc+1]
-	bit := d.mq.Decode(&d.ctx[cxSC+e.ctx]) ^ int(e.xor)
-	if bit != 0 {
-		return stSig | stNeg
-	}
-	return stSig
-}
-
-// useBelow reports whether the row below row y takes part in context
-// formation.
-func (d *Decoder) useBelow(y int) bool {
-	return !d.causal || y&3 != 3
+// becomeSignificant decodes the sign of the coefficient at state index i
+// in row y and marks it significant at bit-plane p.
+func (d *Decoder) becomeSignificant(i, y, k, p int) {
+	ctx, xor := d.signContext(i, y)
+	neg := d.mq.Decode(&d.ctx[cxSC+ctx])^int(xor) != 0
+	d.setSignificant(i, y, neg)
+	d.mag[k] = 3 << uint(p)
 }
 
 // sigPass is the significance propagation pass for bit-plane p.
 func (d *Decoder) sigPass(p int) {
-	w, h, st := d.w, d.h, d.state
+	w, h, st, nb := d.w, d.h, d.st, d.nb
 	for y0 := 0; y0 < h; y0 += 4 {
 		y1 := min(y0+4, h)
 		for x := range w {
 			for y := y0; y < y1; y++ {
-				i := (y+1)*d.stride + x + 1
-				if st[i]&stSig != 0 {
+				i := d.index(x, y)
+				if st[i]&stSig != 0 || nb[i] == 0 {
 					continue
 				}
-				below := d.useBelow(y)
-				label := zcLabel(st, i, d.stride, d.band, below)
-				if label == 0 {
-					continue
-				}
-				if d.mq.Decode(&d.ctx[cxZC+label]) != 0 {
-					st[i] |= d.decodeSign(i, below)
-					d.mag[y*w+x] = 3 << uint(p)
+				if d.mq.Decode(&d.ctx[cxZC+d.lut[nb[i]]]) != 0 {
+					d.becomeSignificant(i, y, y*w+x, p)
 				}
 				st[i] |= stVisited
 			}
@@ -239,23 +168,18 @@ func (d *Decoder) sigPass(p int) {
 
 // sigPassRaw is the significance propagation pass in bypass mode.
 func (d *Decoder) sigPassRaw(p int) {
-	w, h, st := d.w, d.h, d.state
+	w, h, st, nb := d.w, d.h, d.st, d.nb
 	for y0 := 0; y0 < h; y0 += 4 {
 		y1 := min(y0+4, h)
 		for x := range w {
 			for y := y0; y < y1; y++ {
-				i := (y+1)*d.stride + x + 1
-				if st[i]&stSig != 0 {
-					continue
-				}
-				if zcLabel(st, i, d.stride, d.band, d.useBelow(y)) == 0 {
+				i := d.index(x, y)
+				if st[i]&stSig != 0 || nb[i] == 0 {
 					continue
 				}
 				if d.raw.readBit() != 0 {
-					st[i] |= stSig
-					if d.raw.readBit() != 0 {
-						st[i] |= stNeg
-					}
+					neg := d.raw.readBit() != 0
+					d.setSignificant(i, y, neg)
 					d.mag[y*w+x] = 3 << uint(p)
 				}
 				st[i] |= stVisited
@@ -276,19 +200,19 @@ func (d *Decoder) refine(k, p, b int) {
 
 // refPass is the magnitude refinement pass for bit-plane p.
 func (d *Decoder) refPass(p int) {
-	w, h, st := d.w, d.h, d.state
+	w, h, st, nb := d.w, d.h, d.st, d.nb
 	for y0 := 0; y0 < h; y0 += 4 {
 		y1 := min(y0+4, h)
 		for x := range w {
 			for y := y0; y < y1; y++ {
-				i := (y+1)*d.stride + x + 1
+				i := d.index(x, y)
 				if st[i]&(stSig|stVisited) != stSig {
 					continue
 				}
 				var cx *mq.Context
 				if st[i]&stRefined != 0 {
 					cx = &d.ctx[cxMR+2]
-				} else if zcLabel(st, i, d.stride, d.band, d.useBelow(y)) != 0 {
+				} else if nb[i] != 0 {
 					cx = &d.ctx[cxMR+1]
 				} else {
 					cx = &d.ctx[cxMR]
@@ -302,12 +226,12 @@ func (d *Decoder) refPass(p int) {
 
 // refPassRaw is the magnitude refinement pass in bypass mode.
 func (d *Decoder) refPassRaw(p int) {
-	w, h, st := d.w, d.h, d.state
+	w, h, st := d.w, d.h, d.st
 	for y0 := 0; y0 < h; y0 += 4 {
 		y1 := min(y0+4, h)
 		for x := range w {
 			for y := y0; y < y1; y++ {
-				i := (y+1)*d.stride + x + 1
+				i := d.index(x, y)
 				if st[i]&(stSig|stVisited) != stSig {
 					continue
 				}
@@ -321,25 +245,25 @@ func (d *Decoder) refPassRaw(p int) {
 // cleanPass is the cleanup pass for bit-plane p.  It also clears the
 // visited marks left by the significance pass.
 func (d *Decoder) cleanPass(p int) {
-	w, h, st := d.w, d.h, d.state
+	w, h, st, nb := d.w, d.h, d.st, d.nb
 	for y0 := 0; y0 < h; y0 += 4 {
 		y1 := min(y0+4, h)
 		for x := range w {
 			y := y0
-			if y1-y0 == 4 && d.runLengthApplies(x, y0) {
+			i := d.index(x, y0)
+			if y1-y0 == 4 && d.runLengthApplies(i) {
 				if d.mq.Decode(&d.ctx[cxRL]) == 0 {
 					continue
 				}
 				k := d.mq.Decode(&d.ctx[cxUNI]) << 1
 				k |= d.mq.Decode(&d.ctx[cxUNI])
 				y = y0 + k
-				i := (y+1)*d.stride + x + 1
-				st[i] |= d.decodeSign(i, d.useBelow(y))
-				d.mag[y*w+x] = 3 << uint(p)
+				i += k * d.stride
+				d.becomeSignificant(i, y, y*w+x, p)
 				y++
+				i += d.stride
 			}
-			for ; y < y1; y++ {
-				i := (y+1)*d.stride + x + 1
+			for ; y < y1; y, i = y+1, i+d.stride {
 				if st[i]&stVisited != 0 {
 					st[i] &^= stVisited
 					continue
@@ -347,32 +271,12 @@ func (d *Decoder) cleanPass(p int) {
 				if st[i]&stSig != 0 {
 					continue
 				}
-				below := d.useBelow(y)
-				label := zcLabel(st, i, d.stride, d.band, below)
-				if d.mq.Decode(&d.ctx[cxZC+label]) != 0 {
-					st[i] |= d.decodeSign(i, below)
-					d.mag[y*w+x] = 3 << uint(p)
+				if d.mq.Decode(&d.ctx[cxZC+d.lut[nb[i]]]) != 0 {
+					d.becomeSignificant(i, y, y*w+x, p)
 				}
 			}
 		}
 	}
-}
-
-// runLengthApplies reports whether the four coefficients of the column
-// starting at (x, y0) are all insignificant, unvisited and without
-// significant neighbours, so that they are coded in run-length mode.
-func (d *Decoder) runLengthApplies(x, y0 int) bool {
-	st := d.state
-	for y := y0; y < y0+4; y++ {
-		i := (y+1)*d.stride + x + 1
-		if st[i]&(stSig|stVisited) != 0 {
-			return false
-		}
-		if zcLabel(st, i, d.stride, d.band, d.useBelow(y)) != 0 {
-			return false
-		}
-	}
-	return true
 }
 
 // decodeSegSymbol consumes the four-bit segmentation symbol.  A wrong

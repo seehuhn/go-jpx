@@ -443,6 +443,17 @@ func newPrecinctBand(b *Band, pr Rect, level int, charge Charge) (*PrecinctBand,
 	return pb, nil
 }
 
+// NumPackets returns the total number of packets of the tile.
+func (t *Tile) NumPackets() int {
+	n := 0
+	for _, tc := range t.Comps {
+		for _, res := range tc.Res {
+			n += res.PW * res.PH * t.Layers
+		}
+	}
+	return n
+}
+
 // TotalPlanes returns the number of magnitude bit-planes of code-blocks in
 // band b of tile-component tc, including the ROI shift.
 func (tc *TileComp) TotalPlanes(b *Band) int {

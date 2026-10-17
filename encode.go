@@ -5,6 +5,7 @@ package jpx
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -78,6 +79,23 @@ type EncodeParams struct {
 	// SOP and EPH add packet markers to the codestream.
 	SOP, EPH bool
 
+	// TileParts splits the packets of every tile over this many
+	// tile-parts (at most 255); zero or one means a single tile-part per
+	// tile.  Tiles with fewer packets get fewer tile-parts.
+	TileParts int
+
+	// PackedHeaders moves the packet headers out of the tile-part bodies
+	// into PPT marker segments (PackedInTile) or PPM marker segments of
+	// the main header (PackedInMain).  The marker segments hold at most
+	// 64 KiB each and are numbered with one byte, which limits the packed
+	// headers to about 16 MiB per tile or per codestream respectively.
+	PackedHeaders PackedHeaders
+
+	// ProgressionChanges optionally replaces the single progression order
+	// by a sequence of progression volumes.  Together they must cover all
+	// packets; resolution and component ranges must exist in the image.
+	ProgressionChanges []ProgressionChange
+
 	// NoMCT disables the component transform, which is otherwise applied
 	// whenever the first three components have identical sampling.
 	NoMCT bool
@@ -98,6 +116,27 @@ type EncodeParams struct {
 
 	// Budget bounds the working memory; nil means no limit.
 	Budget Budget
+}
+
+// PackedHeaders selects where packet headers are stored.
+type PackedHeaders int
+
+// Packet header placements.
+const (
+	HeadersInline PackedHeaders = iota // in front of each packet body
+	PackedInTile                       // PPT marker segments in the tile-part headers
+	PackedInMain                       // PPM marker segments in the main header
+)
+
+// ProgressionChange is one progression order volume: the packets of
+// resolution levels [ResStart, ResEnd), components [CompStart, CompEnd)
+// and layers below LayerEnd, in the given order, as far as they have not
+// been written by an earlier volume.
+type ProgressionChange struct {
+	ResStart, CompStart int
+	ResEnd, CompEnd     int
+	LayerEnd            int
+	Progression         Progression
 }
 
 // NoLevels as EncodeParams.Levels selects a codestream without wavelet
@@ -327,6 +366,23 @@ func (e *encoder) buildMainHeader() (*codestream.MainHeader, error) {
 	}
 	if p.Progression < LRCP || p.Progression > CPRL {
 		return nil, errors.New("jpx: invalid progression order")
+	}
+	if p.TileParts < 0 || p.TileParts > 255 {
+		return nil, errors.New("jpx: invalid number of tile-parts")
+	}
+	if p.PackedHeaders < HeadersInline || p.PackedHeaders > PackedInMain {
+		return nil, errors.New("jpx: invalid packet header placement")
+	}
+	for _, pc := range p.ProgressionChanges {
+		if pc.ResStart < 0 || pc.ResEnd <= pc.ResStart || pc.ResEnd > levels+1 ||
+			pc.CompStart < 0 || pc.CompEnd <= pc.CompStart || pc.CompEnd > len(img.Components) ||
+			pc.LayerEnd < 1 || pc.LayerEnd > e.layers || pc.Progression < LRCP || pc.Progression > CPRL {
+			return nil, errors.New("jpx: invalid progression order change")
+		}
+		m.POC = append(m.POC, codestream.POCEntry{
+			ResStart: pc.ResStart, CompStart: pc.CompStart, LayerEnd: pc.LayerEnd,
+			ResEnd: pc.ResEnd, CompEnd: pc.CompEnd, Progression: codestream.Progression(pc.Progression),
+		})
 	}
 
 	m.COD = &codestream.COD{
@@ -696,27 +752,131 @@ func (e *encoder) codestream() ([]byte, error) {
 	for _, r := range e.main.RGN {
 		w.RGN(r)
 	}
+	if len(e.main.POC) > 0 {
+		w.POC(e.main.POC)
+	}
 	if w.Err() != nil {
 		return nil, w.Err()
 	}
 
 	nx, ny, _ := e.main.SIZ.NumTiles()
+	var tiles [][]tilePartData
 	for idx := range nx * ny {
-		body, err := e.encodeTile(idx)
+		parts, err := e.encodeTile(idx)
 		if err != nil {
 			return nil, err
 		}
-		sot := buf.Len()
-		w.SOT(idx, 0, 1)
-		w.SOD()
-		if err := w.Err(); err != nil {
+		tiles = append(tiles, parts)
+	}
+
+	if e.p.PackedHeaders == PackedInMain {
+		if err := e.writePPM(w, tiles); err != nil {
 			return nil, err
 		}
-		buf.Write(body)
-		if err := codestream.PatchPsot(buf.Bytes(), sot, uint32(buf.Len()-sot)); err != nil {
-			return nil, err
+	}
+
+	for idx, parts := range tiles {
+		// The PPT index continues across the tile-parts of a tile.  The
+		// standard can be read either way, and widely used decoders
+		// reject an index that restarts in a later tile-part.
+		z := 0
+		for part, tp := range parts {
+			sot := buf.Len()
+			w.SOT(idx, part, len(parts))
+			if e.p.PackedHeaders == PackedInTile {
+				segs, err := splitHeaders(tp.headers, tp.headerLens)
+				if err != nil {
+					return nil, err
+				}
+				for _, seg := range segs {
+					if err := w.PPT(z, seg); err != nil {
+						return nil, err
+					}
+					z++
+				}
+			}
+			w.SOD()
+			if err := w.Err(); err != nil {
+				return nil, err
+			}
+			buf.Write(tp.body)
+			if int64(buf.Len())-int64(sot) > math.MaxUint32 {
+				return nil, errors.New("jpx: tile-part too large")
+			}
+			if err := codestream.PatchPsot(buf.Bytes(), sot, uint32(buf.Len()-sot)); err != nil {
+				return nil, err
+			}
 		}
 	}
 	w.EOC()
 	return buf.Bytes(), w.Err()
+}
+
+// writePPM writes the packet headers of all tile-parts as PPM marker
+// segments: one chunk per tile-part in codestream order, split into
+// segments at packet header boundaries.
+func (e *encoder) writePPM(w *codestream.Writer, tiles [][]tilePartData) error {
+	var packed []byte
+	var lens []int
+	for _, parts := range tiles {
+		for _, tp := range parts {
+			if err := chargeOpt(e.charge, len(tp.headers)+4); err != nil {
+				return err
+			}
+			packed = binary.BigEndian.AppendUint32(packed, uint32(len(tp.headers)))
+			packed = append(packed, tp.headers...)
+			// the chunk length travels with the first header of the chunk
+			if len(tp.headerLens) > 0 {
+				lens = append(lens, 4+tp.headerLens[0])
+				lens = append(lens, tp.headerLens[1:]...)
+			} else {
+				lens = append(lens, 4)
+			}
+		}
+	}
+	segs, err := splitHeaders(packed, lens)
+	if err != nil {
+		return err
+	}
+	for z, seg := range segs {
+		if err := w.PPM(z, seg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// maxSegmentPayload is the most data a PPM or PPT marker segment can hold
+// besides its index byte.
+const maxSegmentPayload = 65535 - 3
+
+// splitHeaders splits concatenated packet headers, whose individual
+// lengths are given by lens, into marker segment payloads that each end
+// on a header boundary.  An empty header list yields one empty segment.
+func splitHeaders(data []byte, lens []int) ([][]byte, error) {
+	var segs [][]byte
+	start, pos := 0, 0
+	for _, n := range lens {
+		if n > maxSegmentPayload {
+			return nil, errors.New("jpx: packet header too large for a marker segment")
+		}
+		if pos+n-start > maxSegmentPayload {
+			segs = append(segs, data[start:pos])
+			start = pos
+		}
+		pos += n
+	}
+	if pos != len(data) {
+		return nil, errors.New("jpx: inconsistent packet header lengths")
+	}
+	return append(segs, data[start:pos]), nil
+}
+
+// tilePartData is the output of the encoder for one tile-part: the
+// packet headers (empty when stored in-line) with their individual
+// lengths, and the body.
+type tilePartData struct {
+	headers    []byte
+	headerLens []int
+	body       []byte
 }

@@ -32,21 +32,18 @@ type Encoded struct {
 	Blocks []BlockData
 }
 
-// WritePacket encodes the packet header and body for layer l of the
-// precinct, appending both to out.  enc[i] holds the encoder data for
-// prec.Bands[i].  SOP and EPH markers are written when the tile uses
-// them.  The returned slice is out with the packet appended.
-func (t *Tile) WritePacket(out []byte, tc *TileComp, prec *Precinct, enc []*Encoded, layer int, seq int) []byte {
+// WritePacket encodes the packet for layer l of the precinct and appends
+// the packet header (with the EPH marker if the tile uses it) to hdr and
+// the packet body to body.  The caller places the two in the codestream
+// or in packed header segments, and writes any SOP marker segment itself.
+// enc[i] holds the encoder data for prec.Bands[i].
+func (t *Tile) WritePacket(hdr, body []byte, tc *TileComp, prec *Precinct, enc []*Encoded, layer int) ([]byte, []byte) {
 	style := t1.Style{
 		Bypass:    tc.Style.EntropyBypass,
 		Terminate: tc.Style.Terminate,
 	}
-	if t.SOP {
-		out = append(out, 0xFF, 0x91, 0, 4, byte(seq>>8), byte(seq))
-	}
-
 	var bw BitWriter
-	var body []byte
+	var data []byte
 	empty := true
 	for bi, pb := range prec.Bands {
 		for i := range pb.Blocks {
@@ -62,18 +59,24 @@ func (t *Tile) WritePacket(out []byte, tc *TileComp, prec *Precinct, enc []*Enco
 			for j := range pb.CBH {
 				for i := range pb.CBW {
 					bd := &enc[bi].Blocks[j*pb.CBW+i]
-					body = t.writeBlockHeader(&bw, pb, bd, i, j, layer, style, body)
+					data = t.writeBlockHeader(&bw, pb, bd, i, j, layer, style, data)
 				}
 			}
 		}
 	} else {
 		bw.WriteBit(0)
 	}
-	out = append(out, bw.Flush()...)
+	hdr = append(hdr, bw.Flush()...)
 	if t.EPH {
-		out = append(out, 0xFF, 0x92)
+		hdr = append(hdr, 0xFF, 0x92)
 	}
-	return append(out, body...)
+	return hdr, append(body, data...)
+}
+
+// SOPMarker returns the start-of-packet marker segment for packet
+// sequence number seq.
+func SOPMarker(seq int) []byte {
+	return []byte{0xFF, 0x91, 0, 4, byte(seq >> 8), byte(seq)}
 }
 
 // writeBlockHeader writes the header fields of one code-block for the
