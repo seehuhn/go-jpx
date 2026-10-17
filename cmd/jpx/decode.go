@@ -11,15 +11,22 @@ import (
 	"image/color"
 	"image/png"
 	"os"
+	"sync"
 	"time"
 
 	"seehuhn.de/go/jpx"
 )
 
-// budget limits the memory available to the decoder.
-type budget struct{ left int64 }
+// budget limits the memory available to the decoder.  It is safe for
+// concurrent use, as decoding with several workers requires.
+type budget struct {
+	mu   sync.Mutex
+	left int64
+}
 
 func (b *budget) Charge(n int) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if n < 0 || int64(n) > b.left {
 		return jpx.ErrBudget
 	}
@@ -32,6 +39,7 @@ func runDecode(args []string) error {
 	fs := flag.NewFlagSet("decode", flag.ExitOnError)
 	reduce := fs.Int("reduce", 0, "number of resolution levels to discard")
 	mib := fs.Int("budget", 0, "memory budget in MiB (0 for the default)")
+	workers := fs.Int("workers", 1, "number of tiles decoded concurrently")
 	asPNG := fs.Bool("png", false, "write a PNG file (default)")
 	asPGX := fs.Bool("pgx", false, "write one PGX file per component")
 	fs.Parse(args)
@@ -47,7 +55,7 @@ func runDecode(args []string) error {
 	}
 	defer f.Close()
 
-	opt := &jpx.Options{Reduce: *reduce}
+	opt := &jpx.Options{Reduce: *reduce, Workers: *workers}
 	if *mib > 0 {
 		opt.Budget = &budget{left: int64(*mib) << 20}
 	}
