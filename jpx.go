@@ -182,6 +182,12 @@ type Options struct {
 	// Reduce discards this many resolution levels: the result has
 	// roughly 1/2^Reduce of the width and height of the full image.
 	Reduce int
+
+	// Workers is the number of goroutines decoding tiles concurrently.
+	// Zero or one decodes sequentially.  The Budget must be safe for
+	// concurrent use when Workers is larger than one, and which of
+	// several errors is reported may then vary between runs.
+	Workers int
 }
 
 // MaxDepth is the largest sample precision the decoder supports.

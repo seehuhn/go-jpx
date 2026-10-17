@@ -11,6 +11,8 @@ import (
 	"maps"
 	"math"
 	"slices"
+	"sync"
+	"sync/atomic"
 
 	"seehuhn.de/go/jpx/internal/codestream"
 	"seehuhn.de/go/jpx/internal/jp2"
@@ -27,12 +29,17 @@ const (
 // charged before memory is used.
 const readChunk = 64 << 10
 
-type simpleBudget struct{ left int64 }
+type simpleBudget struct {
+	mu   sync.Mutex
+	left int64
+}
 
 func (b *simpleBudget) Charge(n int) error {
 	if n < 0 {
 		return errors.New("jpx: negative allocation")
 	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if int64(n) > b.left {
 		return ErrBudget
 	}
@@ -143,13 +150,70 @@ func Decode(r io.Reader, opt *Options) (*Image, error) {
 		return nil, err
 	}
 
-	dec := newTileDecoder(m, img, charge)
-	for _, idx := range slices.Sorted(maps.Keys(parts)) {
-		if err := dec.decodeTile(idx, parts[idx]); err != nil {
-			return nil, err
-		}
+	if err := decodeTiles(m, img, charge, parts, opt.Workers); err != nil {
+		return nil, err
 	}
 	return img, nil
+}
+
+// decodeTiles decodes all tiles, concurrently when more than one worker
+// is requested.  Every worker has its own buffers; the output planes are
+// shared, with each tile writing to its own region.
+func decodeTiles(m *codestream.MainHeader, img *Image, charge func(int) error, parts map[int][]tilePart, workers int) error {
+	indices := slices.Sorted(maps.Keys(parts))
+	workers = max(1, min(workers, len(indices)))
+	if workers == 1 {
+		dec := newTileDecoder(m, img, charge)
+		for _, idx := range indices {
+			if err := dec.decodeTile(idx, parts[idx]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+		next     atomic.Int64
+	)
+	// the packed packet headers of the main header are parsed once and
+	// shared read-only by all workers
+	shared := newTileDecoder(m, img, charge)
+	if err := shared.loadPPM(); err != nil {
+		return err
+	}
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			dec := newTileDecoder(m, img, charge)
+			dec.ppm = shared.ppm
+			for {
+				i := int(next.Add(1) - 1)
+				if i >= len(indices) {
+					return
+				}
+				mu.Lock()
+				failed := firstErr != nil
+				mu.Unlock()
+				if failed {
+					return
+				}
+				if err := dec.decodeTile(indices[i], parts[indices[i]]); err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					mu.Unlock()
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return firstErr
 }
 
 // allocPlanes creates the output planes at the requested reduction.

@@ -119,13 +119,8 @@ func (d *tileDecoder) readPackets(tile *t2.Tile, tps []tilePart) error {
 	var parts []part
 	switch {
 	case d.m.UsesPPM():
-		if d.ppm == nil {
-			// a truncated PPM list still yields the complete chunks
-			chunks, err := d.m.PackedHeaders(d.chargeBytes)
-			if err != nil && (d.budgetErr != nil || chunks == nil) {
-				return err
-			}
-			d.ppm = chunks
+		if err := d.loadPPM(); err != nil {
+			return err
 		}
 		for _, tp := range tps {
 			if tp.seq >= len(d.ppm) {
@@ -173,6 +168,20 @@ func (d *tileDecoder) readPackets(tile *t2.Tile, tps []tilePart) error {
 			}
 		}
 	}
+	return nil
+}
+
+// loadPPM parses the packed packet headers of the main header, once.  A
+// truncated PPM list still yields the complete chunks.
+func (d *tileDecoder) loadPPM() error {
+	if d.ppm != nil || !d.m.UsesPPM() {
+		return nil
+	}
+	chunks, err := d.m.PackedHeaders(d.chargeBytes)
+	if err != nil && (d.budgetErr != nil || chunks == nil) {
+		return err
+	}
+	d.ppm = chunks
 	return nil
 }
 

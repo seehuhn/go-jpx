@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -574,4 +575,76 @@ func ExampleEncode() {
 	}
 	fmt.Println(got.Planes[0].Pix)
 	// Output: [0 64 128 255 255 128 64 0]
+}
+
+func TestDecodeWorkers(t *testing.T) {
+	comps := []Component{{Depth: 8, DX: 1, DY: 1}, {Depth: 8, DX: 2, DY: 1}, {Depth: 10, DX: 1, DY: 3}}
+	img := testImage(130, 97, comps, 15)
+	poc := []ProgressionChange{
+		{ResStart: 0, ResEnd: 2, CompStart: 0, CompEnd: 3, LayerEnd: 2, Progression: LRCP},
+		{ResStart: 0, ResEnd: 6, CompStart: 0, CompEnd: 3, LayerEnd: 2, Progression: CPRL},
+	}
+	for _, p := range []EncodeParams{
+		{TileWidth: 32, TileHeight: 40, Layers: 2},
+		{TileWidth: 32, TileHeight: 40, PackedHeaders: PackedInMain, TileParts: 2},
+		{TileWidth: 32, TileHeight: 40, PackedHeaders: PackedInTile, TileParts: 3, Layers: 2, ProgressionChanges: poc},
+		{Lossy: true, TileWidth: 50, TileHeight: 50, SOP: true, EPH: true, Bypass: true, Terminate: true},
+		{TileWidth: 50, TileHeight: 50, ROI: &Rectangle{10, 10, 60, 60}, SegmentationSymbols: true},
+	} {
+		var buf bytes.Buffer
+		if err := Encode(&buf, img, &p); err != nil {
+			t.Fatal(err)
+		}
+		data := buf.Bytes()
+		for _, reduce := range []int{0, 1, 2} {
+			want, err := Decode(bytes.NewReader(data), &Options{Reduce: reduce})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, workers := range []int{2, 3, 16} {
+				got, err := Decode(bytes.NewReader(data), &Options{Workers: workers, Reduce: reduce})
+				if err != nil {
+					t.Fatalf("%d workers, reduce %d: %v", workers, reduce, err)
+				}
+				if diff := cmp.Diff(want.Planes, got.Planes); diff != "" {
+					t.Errorf("%d workers, reduce %d (-want +got):\n%s", workers, reduce, diff)
+				}
+			}
+		}
+
+		// a budget that suffices sequentially also suffices concurrently,
+		// and one that does not stops the concurrent decode as well
+		seq := &syncBudget{left: 64 << 20}
+		if _, err := Decode(bytes.NewReader(data), &Options{Budget: seq}); err != nil {
+			t.Fatal(err)
+		}
+		used := 64<<20 - seq.left
+		if _, err := Decode(bytes.NewReader(data), &Options{Workers: 4, Budget: &syncBudget{left: 2 * used}}); err != nil {
+			t.Errorf("twice the sequential budget was not enough with workers: %v", err)
+		}
+		if _, err := Decode(bytes.NewReader(data), &Options{Workers: 4, Budget: &syncBudget{left: used / 4}}); !errors.Is(err, ErrBudget) {
+			t.Errorf("a quarter of the sequential budget: got %v, want budget error", err)
+		}
+
+		// truncated input decodes to a partial image with any number of workers
+		if _, err := Decode(bytes.NewReader(data[:len(data)*2/3]), &Options{Workers: 3}); err != nil {
+			t.Errorf("truncated input with workers: %v", err)
+		}
+	}
+}
+
+// syncBudget is a concurrency-safe budget for tests.
+type syncBudget struct {
+	mu   sync.Mutex
+	left int64
+}
+
+func (b *syncBudget) Charge(n int) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if int64(n) > b.left {
+		return ErrBudget
+	}
+	b.left -= int64(n)
+	return nil
 }
