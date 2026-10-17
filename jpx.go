@@ -67,7 +67,11 @@ const (
 // Channel describes how one channel of the image is to be interpreted.
 // Channels are listed in channel order.  Without a palette, channel i
 // takes its samples from component i; with a palette, the component
-// mapping box determines the source of each channel.
+// mapping box determines the source of each channel.  Component and
+// PaletteColumn always refer to existing components and columns: a
+// mapping box with invalid references is ignored together with the
+// palette, and channel definitions for channels that do not exist are
+// dropped.
 type Channel struct {
 	// Component is the index of the component providing the samples.
 	Component int
@@ -76,7 +80,11 @@ type Channel struct {
 	// into, or -1 if the samples are used directly.
 	PaletteColumn int
 
+	// Kind classifies the channel; Type is the raw channel type value
+	// from the channel definition box (0 colour, 1 opacity, 2
+	// premultiplied opacity, 65535 unspecified), or 0 when synthesised.
 	Kind ChannelKind
+	Type int
 
 	// Assoc gives the colour channel this channel is associated with:
 	// 0 means the whole image, n ≥ 1 means colour channel n (counted
@@ -113,7 +121,13 @@ type ColorSpec struct {
 // the value of column j of palette entry i.
 type Palette struct {
 	Entries [][]int32
-	Columns []Component // Depth and Signed of each column
+	Columns []PaletteColumn
+}
+
+// PaletteColumn describes the values of one palette column.
+type PaletteColumn struct {
+	Depth  int
+	Signed bool
 }
 
 // Header describes a JPEG 2000 image without its sample data.
@@ -159,6 +173,8 @@ func (p *Plane) At(x, y int) int32 { return p.Pix[y*p.Width+x] }
 
 // Image is a decoded JPEG 2000 image.
 type Image struct {
+	// Header describes the image at full resolution, whatever the
+	// reduction.
 	Header
 
 	// Reduce is the number of resolution levels that were discarded.
@@ -172,11 +188,12 @@ type Image struct {
 
 // Options controls decoding.
 type Options struct {
-	// Budget bounds the working memory, including the decoded planes.
-	// With a nil Budget the decoder limits itself to DefaultBudgetBase
-	// plus DefaultBudgetPerByte bytes for every byte of input, so that a
-	// small hostile file cannot exhaust memory; images needing more must
-	// be decoded with an explicit, larger budget.
+	// Budget bounds the working memory, including the decoded planes;
+	// only the copy of the input itself is exempt.  With a nil Budget
+	// the decoder limits itself to DefaultBudgetBase plus
+	// DefaultBudgetPerByte bytes for every byte of input, so that a small
+	// hostile file cannot exhaust memory; images needing more must be
+	// decoded with an explicit, larger budget.
 	Budget Budget
 
 	// Reduce discards this many resolution levels: the result has

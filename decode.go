@@ -91,33 +91,23 @@ func Decode(r io.Reader, opt *Options) (*Image, error) {
 	// The input is read first.  Without a caller-supplied budget the
 	// decoder limits itself to a fixed allowance plus a multiple of the
 	// input size, so that small hostile files cannot exhaust memory.
-	var charge func(int) error
-	var data []byte
-	if opt.Budget != nil {
-		charge = opt.Budget.Charge
-		var err error
-		data, err = readAll(r, charge)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		var err error
-		data, err = readAll(r, nil)
-		if err != nil {
-			return nil, err
-		}
+	charge := chargeFunc(opt.Budget)
+	data, err := readAll(r, charge)
+	if err != nil {
+		return nil, err
+	}
+	if charge == nil {
 		b := &simpleBudget{left: DefaultBudgetBase + DefaultBudgetPerByte*int64(len(data))}
 		charge = b.Charge
 	}
 
-	wrapper, csr, err := jp2.Read(bytes.NewReader(data), charge)
+	br := bytes.NewReader(data)
+	wrapper, csr, err := jp2.Read(br, charge)
 	if err != nil {
 		return nil, err
 	}
-	var cs []byte
-	if !wrapper.HasWrapper {
-		cs = data
-	} else if cs, err = readAll(csr, charge); err != nil {
+	cs, err := codestreamBytes(data, br, csr, charge)
+	if err != nil {
 		return nil, err
 	}
 
@@ -214,6 +204,27 @@ func decodeTiles(m *codestream.MainHeader, img *Image, charge func(int) error, p
 	}
 	wg.Wait()
 	return firstErr
+}
+
+// codestreamBytes returns the codestream found by the box reader as a
+// slice of the input where possible, so that the input is not copied a
+// second time.  Fragmented codestreams are assembled into a new buffer.
+func codestreamBytes(data []byte, br *bytes.Reader, csr io.Reader, charge func(int) error) ([]byte, error) {
+	switch r := csr.(type) {
+	case *bytes.Reader:
+		if r == br {
+			// the rest of the input: a bare codestream (rewound to the
+			// start) or a codestream box running to the end of the file
+			return data[len(data)-br.Len():], nil
+		}
+	case *io.LimitedReader:
+		if r.R == br {
+			start := len(data) - br.Len()
+			end := min(len(data), start+int(min(r.N, int64(len(data)))))
+			return data[start:end], nil
+		}
+	}
+	return readAll(csr, charge)
 }
 
 // allocPlanes creates the output planes at the requested reduction.

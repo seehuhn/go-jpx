@@ -5,6 +5,7 @@ package jpx
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -18,7 +19,7 @@ func TestApplyPalette(t *testing.T) {
 			Components: []Component{{Depth: 2, DX: 1, DY: 1, Width: 2, Height: 2}},
 			Palette: &Palette{
 				Entries: [][]int32{{10, 100}, {20, 200}, {30, 300}},
-				Columns: []Component{{Depth: 8}, {Depth: 9}},
+				Columns: []PaletteColumn{{Depth: 8}, {Depth: 9}},
 			},
 			Channels: []Channel{
 				{Component: 0, PaletteColumn: 0, Kind: ChannelColor, Assoc: 1},
@@ -28,7 +29,7 @@ func TestApplyPalette(t *testing.T) {
 		},
 		Planes: []Plane{{Width: 2, Height: 2, Pix: []int32{0, 1, 2, 3}}},
 	}
-	got, err := ApplyPalette(img)
+	got, err := ApplyPalette(img, newTestBudget(1<<20))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,8 +55,23 @@ func TestApplyPalette(t *testing.T) {
 
 	// an image without a palette is returned unchanged
 	plain := testImage(4, 4, gray(8), 1)
-	if same, _ := ApplyPalette(plain); same != plain {
+	if same, _ := ApplyPalette(plain, nil); same != plain {
 		t.Error("image without palette was copied")
+	}
+
+	// the new planes are charged to the budget
+	if _, err := ApplyPalette(img, newTestBudget(8)); !errors.Is(err, ErrBudget) {
+		t.Errorf("tiny budget: got %v, want budget error", err)
+	}
+	// inconsistent images are rejected, not mishandled
+	bad := *img
+	bad.Channels = []Channel{{Component: 5, PaletteColumn: 0}}
+	if _, err := ApplyPalette(&bad, nil); err == nil {
+		t.Error("channel with missing component accepted")
+	}
+	bad.Channels = []Channel{{Component: 0, PaletteColumn: 7}}
+	if _, err := ApplyPalette(&bad, nil); err == nil {
+		t.Error("channel with missing palette column accepted")
 	}
 }
 
@@ -83,6 +99,10 @@ func TestSYCCToRGB(t *testing.T) {
 	}
 	if err := SYCCToRGB(testImage(2, 2, gray(8), 1)); err == nil {
 		t.Error("single plane accepted")
+	}
+	short := &Image{Header: Header{Components: gray(8)}, Planes: img.Planes}
+	if err := SYCCToRGB(short); err == nil {
+		t.Error("three planes with one component accepted")
 	}
 }
 

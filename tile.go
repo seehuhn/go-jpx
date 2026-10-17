@@ -439,6 +439,9 @@ func (d *tileDecoder) store(c int, tc *t2.TileComp) {
 			src := d.fbuf[c][y*w:][:w]
 			for x, v := range src {
 				r := math.Floor(float64(v)+0.5) + float64(offset)
+				if r != r { // NaN from overflowing hostile coefficients
+					r = float64(offset)
+				}
 				dst[x] = int32(min(max(r, float64(lo)), float64(hi)))
 			}
 		}

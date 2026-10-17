@@ -13,8 +13,9 @@ import (
 // palette column.  Channels that read a component directly share the
 // component's plane.  The returned image has no palette; its Components
 // describe the channels.  Images without a palette are returned
-// unchanged.
-func ApplyPalette(img *Image) (*Image, error) {
+// unchanged.  The new planes are charged to the budget, which may be
+// nil.
+func ApplyPalette(img *Image, budget Budget) (*Image, error) {
 	if img.Palette == nil {
 		return img, nil
 	}
@@ -24,7 +25,7 @@ func ApplyPalette(img *Image) (*Image, error) {
 	out.Components = nil
 	out.Channels = nil
 	for i, ch := range img.Channels {
-		if ch.Component < 0 || ch.Component >= len(img.Planes) {
+		if ch.Component < 0 || ch.Component >= len(img.Planes) || ch.Component >= len(img.Components) {
 			return nil, errors.New("jpx: channel refers to a missing component")
 		}
 		src := img.Planes[ch.Component]
@@ -39,6 +40,11 @@ func ApplyPalette(img *Image) (*Image, error) {
 			if len(pal.Entries) == 0 {
 				return nil, errors.New("jpx: empty palette")
 			}
+			if budget != nil {
+				if err := budget.Charge(4 * len(src.Pix)); err != nil {
+					return nil, err
+				}
+			}
 			col := pal.Columns[ch.PaletteColumn]
 			dst := Plane{Width: src.Width, Height: src.Height, Pix: make([]int32, len(src.Pix))}
 			for k, v := range src.Pix {
@@ -46,8 +52,10 @@ func ApplyPalette(img *Image) (*Image, error) {
 				dst.Pix[k] = pal.Entries[idx][ch.PaletteColumn]
 			}
 			out.Planes = append(out.Planes, dst)
-			col.DX, col.DY, col.Width, col.Height = comp.DX, comp.DY, comp.Width, comp.Height
-			out.Components = append(out.Components, col)
+			out.Components = append(out.Components, Component{
+				Depth: col.Depth, Signed: col.Signed,
+				DX: comp.DX, DY: comp.DY, Width: comp.Width, Height: comp.Height,
+			})
 		}
 		out.Channels = append(out.Channels, Channel{Component: i, PaletteColumn: -1, Kind: ch.Kind, Assoc: ch.Assoc})
 	}
@@ -60,12 +68,13 @@ func ApplyPalette(img *Image) (*Image, error) {
 // be upsampled by the caller first.  Signed components are not
 // supported.
 func SYCCToRGB(img *Image) error {
-	if len(img.Planes) < 3 {
+	if len(img.Planes) < 3 || len(img.Components) < 3 {
 		return errors.New("jpx: sYCC conversion needs three planes")
 	}
 	y, cb, cr := img.Planes[0], img.Planes[1], img.Planes[2]
 	c := img.Components
-	if y.Width != cb.Width || y.Height != cb.Height || y.Width != cr.Width || y.Height != cr.Height {
+	if y.Width != cb.Width || y.Height != cb.Height || y.Width != cr.Width || y.Height != cr.Height ||
+		len(y.Pix) != y.Width*y.Height || len(cb.Pix) != len(y.Pix) || len(cr.Pix) != len(y.Pix) {
 		return errors.New("jpx: sYCC planes differ in size")
 	}
 	if c[0].Depth != c[1].Depth || c[0].Depth != c[2].Depth || c[0].Signed || c[1].Signed || c[2].Signed {

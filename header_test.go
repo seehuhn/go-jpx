@@ -49,3 +49,36 @@ func TestReadHeader(t *testing.T) {
 		}
 	}
 }
+
+// A component mapping box referring to components or palette columns
+// that do not exist is ignored together with the palette, and channel
+// definitions for channels that do not exist are dropped, so that the
+// header's references are always valid.
+func TestInvalidMappingIgnored(t *testing.T) {
+	img := testImage(8, 8, gray(4), 8)
+	img.Palette = &Palette{Columns: []PaletteColumn{{Depth: 8}}, Entries: [][]int32{{1}, {2}}}
+	img.Channels = []Channel{{Component: 0, PaletteColumn: 0, Kind: ChannelColor, Assoc: 1}}
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, &EncodeParams{Wrapper: true}); err != nil {
+		t.Fatal(err)
+	}
+	data := buf.Bytes()
+	// patch the cmap entry to refer to component 9
+	cmap := bytes.Index(data, []byte("cmap"))
+	if cmap < 0 {
+		t.Fatal("cmap box not found")
+	}
+	data[cmap+5] = 9 // CMP field of the first entry
+	h, err := ReadHeader(bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Palette != nil || len(h.Channels) != 1 || h.Channels[0].Component != 0 || h.Channels[0].PaletteColumn != -1 {
+		t.Errorf("invalid mapping not ignored: palette %v, channels %+v", h.Palette != nil, h.Channels)
+	}
+	for _, ch := range h.Channels {
+		if ch.Component >= len(h.Components) {
+			t.Errorf("channel refers to component %d of %d", ch.Component, len(h.Components))
+		}
+	}
+}

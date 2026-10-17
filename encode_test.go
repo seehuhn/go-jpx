@@ -300,7 +300,7 @@ func TestWrapperMetadata(t *testing.T) {
 	img.Channels = []Channel{
 		{Component: 0, PaletteColumn: -1, Kind: ChannelColor, Assoc: 1},
 		{Component: 1, PaletteColumn: -1, Kind: ChannelColor, Assoc: 2},
-		{Component: 2, PaletteColumn: -1, Kind: ChannelOpacity, Assoc: 0},
+		{Component: 2, PaletteColumn: -1, Kind: ChannelOpacity, Type: 1, Assoc: 0},
 	}
 	var buf bytes.Buffer
 	if err := Encode(&buf, img, &EncodeParams{Wrapper: true}); err != nil {
@@ -322,7 +322,7 @@ func TestWrapperMetadata(t *testing.T) {
 func TestPaletteMetadata(t *testing.T) {
 	img := testImage(8, 8, gray(4), 8)
 	img.Palette = &Palette{
-		Columns: []Component{{Depth: 8}, {Depth: 8}, {Depth: 10, Signed: true}},
+		Columns: []PaletteColumn{{Depth: 8}, {Depth: 8}, {Depth: 10, Signed: true}},
 	}
 	for i := range 16 {
 		img.Palette.Entries = append(img.Palette.Entries, []int32{int32(i * 17), int32(255 - i*17), int32(i - 8)})
@@ -488,15 +488,8 @@ func TestPackedHeaderSegments(t *testing.T) {
 }
 
 func FuzzRoundTrip(f *testing.F) {
-	for _, comps := range [][]Component{gray(8), rgb(8)} {
-		img := testImage(20, 14, comps, 10)
-		for _, p := range []EncodeParams{{}, {Lossy: true, Layers: 2}, {Bypass: true, Terminate: true, TileWidth: 8, TileHeight: 8}} {
-			var buf bytes.Buffer
-			if err := Encode(&buf, img, &p); err != nil {
-				f.Fatal(err)
-			}
-			f.Add(buf.Bytes())
-		}
+	for _, s := range fuzzSeeds(f) {
+		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		b := newTestBudget(min(1<<20+1024*int64(len(data)), 4<<20))

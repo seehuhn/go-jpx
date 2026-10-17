@@ -8,6 +8,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"seehuhn.de/go/jpx/internal/codestream"
 )
 
@@ -188,6 +189,31 @@ func TestDecodeHostileSize(t *testing.T) {
 	}
 }
 
+// A codestream box with length zero extends to the end of the file.
+func TestDecodeCodestreamToEOF(t *testing.T) {
+	img := testImage(10, 7, rgb(8), 16)
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, &EncodeParams{Wrapper: true}); err != nil {
+		t.Fatal(err)
+	}
+	data := buf.Bytes()
+	i := bytes.LastIndex(data, []byte("jp2c"))
+	if i < 4 {
+		t.Fatal("jp2c box not found")
+	}
+	copy(data[i-4:i], []byte{0, 0, 0, 0})
+	got, err := Decode(bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff(img.Planes, got.Planes); diff != "" {
+		t.Errorf("round trip failed (-want +got):\n%s", diff)
+	}
+	if _, err := ReadHeader(bytes.NewReader(data), nil); err != nil {
+		t.Errorf("ReadHeader: %v", err)
+	}
+}
+
 func TestDecodeGarbage(t *testing.T) {
 	for _, data := range [][]byte{
 		nil,
@@ -215,10 +241,49 @@ func TestDecodeDefaultBudget(t *testing.T) {
 	}
 }
 
-func FuzzDecode(f *testing.F) {
+// fuzzSeeds returns encoded images that reach the wrapper, palette,
+// channel definition, tiling and packed header code paths.
+func fuzzSeeds(f *testing.F) [][]byte {
 	comps := []codestream.ComponentSIZ{{Depth: 8, XRsiz: 1, YRsiz: 1}, {Depth: 8, XRsiz: 1, YRsiz: 1}}
-	f.Add(minimalCodestream(minimalParams{width: 40, height: 30, comps: comps, levels: 2, tileSize: 16}))
-	f.Add(minimalCodestream(minimalParams{width: 7, height: 5, comps: comps[:1], levels: 0}))
+	seeds := [][]byte{
+		minimalCodestream(minimalParams{width: 40, height: 30, comps: comps, levels: 2, tileSize: 16}),
+		minimalCodestream(minimalParams{width: 7, height: 5, comps: comps[:1], levels: 0}),
+	}
+	pal := testImage(8, 8, gray(4), 8)
+	pal.Palette = &Palette{Columns: []PaletteColumn{{Depth: 8}, {Depth: 8}, {Depth: 8}}}
+	for i := range 16 {
+		pal.Palette.Entries = append(pal.Palette.Entries, []int32{int32(i * 17), int32(255 - i*17), 7})
+	}
+	pal.Channels = []Channel{
+		{Component: 0, PaletteColumn: 0, Kind: ChannelColor, Assoc: 1},
+		{Component: 0, PaletteColumn: 1, Kind: ChannelColor, Assoc: 2},
+		{Component: 0, PaletteColumn: 2, Kind: ChannelColor, Assoc: 3},
+	}
+	alpha := testImage(12, 10, rgb(8), 9)
+	alpha.Channels[2] = Channel{Component: 2, PaletteColumn: -1, Kind: ChannelOpacity, Type: 1, Assoc: 0}
+	alpha.ColorSpecs = []ColorSpec{{Method: 2, ICC: []byte{1, 2, 3, 4}}, {Method: 1, Enumerated: 16}}
+	for _, c := range []struct {
+		img *Image
+		p   EncodeParams
+	}{
+		{pal, EncodeParams{Wrapper: true}},
+		{alpha, EncodeParams{Wrapper: true, Lossy: true, Layers: 2}},
+		{testImage(20, 14, rgb(8), 10), EncodeParams{TileWidth: 8, TileHeight: 8, PackedHeaders: PackedInMain, TileParts: 2, SOP: true, EPH: true}},
+		{testImage(20, 14, gray(8), 10), EncodeParams{PackedHeaders: PackedInTile, Bypass: true, Terminate: true, Progression: RPCL}},
+	} {
+		var buf bytes.Buffer
+		if err := Encode(&buf, c.img, &c.p); err != nil {
+			f.Fatal(err)
+		}
+		seeds = append(seeds, buf.Bytes())
+	}
+	return seeds
+}
+
+func FuzzDecode(f *testing.F) {
+	for _, s := range fuzzSeeds(f) {
+		f.Add(s)
+	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		b := newTestBudget(min(1<<20+1024*int64(len(data)), 4<<20))
 		img, err := Decode(bytes.NewReader(data), &Options{Budget: b})
@@ -230,12 +295,22 @@ func FuzzDecode(f *testing.F) {
 				t.Fatalf("plane %d: %d samples for %dx%d", c, len(p.Pix), p.Width, p.Height)
 			}
 		}
+		// the header's references must be usable without further checks
+		for _, ch := range img.Channels {
+			if ch.Component >= len(img.Components) || (ch.PaletteColumn >= 0 && (img.Palette == nil || ch.PaletteColumn >= len(img.Palette.Columns))) {
+				t.Fatalf("channel %+v refers outside the image", ch)
+			}
+		}
+		if _, err := ApplyPalette(img, b); err != nil && !errors.Is(err, ErrBudget) {
+			t.Fatalf("ApplyPalette: %v", err)
+		}
 	})
 }
 
 func FuzzReadHeader(f *testing.F) {
-	comps := []codestream.ComponentSIZ{{Depth: 8, XRsiz: 1, YRsiz: 1}}
-	f.Add(minimalCodestream(minimalParams{width: 40, height: 30, comps: comps, levels: 2}))
+	for _, s := range fuzzSeeds(f) {
+		f.Add(s)
+	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		b := newTestBudget(min(1<<20+1024*int64(len(data)), 4<<20))
 		_, _ = ReadHeader(bytes.NewReader(data), b)

@@ -45,6 +45,13 @@ func Read(r io.Reader, charge func(n int) error) (*Header, io.Reader, error) {
 	n, err := io.ReadFull(r, first)
 	first = first[:n]
 	if n >= 4 && first[0] == 0xFF && first[1] == 0x4F && first[2] == 0xFF && first[3] == 0x51 {
+		// a bare codestream; hand back the whole input, rewinding when
+		// possible so that callers can recognise their own reader
+		if s, ok := r.(io.Seeker); ok {
+			if _, err := s.Seek(0, io.SeekStart); err == nil {
+				return &Header{}, r, nil
+			}
+		}
 		return &Header{}, io.MultiReader(bytes.NewReader(first), r), nil
 	}
 	if err != nil || !bytes.Equal(first, signature) {
@@ -161,7 +168,15 @@ func fragmentReader(r io.Reader, ftbl []byte, charge func(int) error) (io.Reader
 		if err := charge(nf * 64); err != nil {
 			return nil, err
 		}
+		// when the size of the input is known, every fragment must lie
+		// inside it and the fragments together must not exceed it, so
+		// that the codestream cannot be larger than the file
+		size := int64(-1)
+		if sr, ok := r.(interface{ Size() int64 }); ok {
+			size = sr.Size()
+		}
 		var parts []io.Reader
+		var covered int64
 		for range nf {
 			off := binary.BigEndian.Uint64(d)
 			length := binary.BigEndian.Uint32(d[8:])
@@ -172,6 +187,15 @@ func fragmentReader(r io.Reader, ftbl []byte, charge func(int) error) (io.Reader
 			}
 			if off > math.MaxInt64-math.MaxUint32 {
 				return nil, errors.New("jp2: invalid fragment offset")
+			}
+			if size >= 0 {
+				if int64(off)+int64(length) > size {
+					return nil, errors.New("jp2: fragment beyond the end of the file")
+				}
+				covered += int64(length)
+				if covered > size {
+					return nil, errors.New("jp2: fragments larger than the file")
+				}
 			}
 			parts = append(parts, io.NewSectionReader(ra, int64(off), int64(length)))
 		}

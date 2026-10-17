@@ -88,7 +88,7 @@ type Component struct{ Depth int; Signed bool; DX, DY int }
 type Channel struct{ Component int; Kind ChannelKind; Assoc int }
 type ColorSpec struct{ Method, Precedence, Approx, Enumerated int; ICC []byte }
 
-func ReadHeader(r io.Reader) (*Header, error)
+func ReadHeader(r io.Reader, budget Budget) (*Header, error)
 func Decode(r io.Reader, opt *Options) (*Image, error)   // Options{Budget, Reduce}
 func Encode(w io.Writer, img *Image, p *EncodeParams) error
 ```

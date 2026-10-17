@@ -14,11 +14,13 @@ import (
 
 // ReadHeader parses the file structure and the main codestream header of
 // a JPEG 2000 image.  It reads only as far as needed and keeps only the
-// header information; the sample data is not decoded.
+// header information; the sample data is not decoded.  Unlike Decode it
+// also reports images whose precision exceeds what the decoder supports.
 //
 // Memory use is bounded by the size of the header boxes and marker
 // segments actually read.  A nil budget means that only this implicit
-// bound applies.
+// bound applies.  JPX files whose codestream is given by a fragment
+// table need an r that implements io.ReaderAt.
 func ReadHeader(r io.Reader, budget Budget) (*Header, error) {
 	charge := chargeFunc(budget)
 	wrapper, cs, err := jp2.Read(r, charge)
@@ -78,15 +80,34 @@ func buildHeader(w *jp2.Header, m *codestream.MainHeader) (*Header, error) {
 		})
 	}
 
-	if w.Palette != nil && len(w.ComponentMap) > 0 {
+	// a palette needs a mapping box with valid references; otherwise the
+	// pair is ignored and the components are the channels
+	if w.Palette != nil && validMapping(w, len(h.Components)) {
 		h.Palette = &Palette{Entries: w.Palette.Values}
 		for _, d := range w.Palette.Depths {
-			h.Palette.Columns = append(h.Palette.Columns, Component{Depth: d.Depth, Signed: d.Signed})
+			h.Palette.Columns = append(h.Palette.Columns, PaletteColumn{Depth: d.Depth, Signed: d.Signed})
 		}
 	}
 
 	h.Channels = buildChannels(w, h)
 	return h, nil
+}
+
+// validMapping reports whether the component mapping box exists and
+// refers only to existing components and palette columns.
+func validMapping(w *jp2.Header, numComps int) bool {
+	if len(w.ComponentMap) == 0 {
+		return false
+	}
+	for _, cm := range w.ComponentMap {
+		if int(cm.Component) >= numComps {
+			return false
+		}
+		if cm.MappingType == 1 && int(cm.PaletteColumn) >= len(w.Palette.Depths) {
+			return false
+		}
+	}
+	return true
 }
 
 // buildChannels derives the channel list from the component mapping and
@@ -115,6 +136,7 @@ func buildChannels(w *jp2.Header, h *Header) []Channel {
 		if i >= len(channels) {
 			continue
 		}
+		channels[i].Type = int(cd.Type)
 		switch cd.Type {
 		case 0:
 			channels[i].Kind = ChannelColor
