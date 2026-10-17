@@ -15,6 +15,7 @@ import (
 	"seehuhn.de/go/jpx/internal/dwt"
 	"seehuhn.de/go/jpx/internal/jp2"
 	"seehuhn.de/go/jpx/internal/t1"
+	"seehuhn.de/go/membudget"
 )
 
 // Progression orders for the encoder.
@@ -115,7 +116,7 @@ type EncodeParams struct {
 	Wrapper bool
 
 	// Budget bounds the working memory; nil means no limit.
-	Budget Budget
+	Budget *membudget.Budget
 }
 
 // PackedHeaders selects where packet headers are stored.

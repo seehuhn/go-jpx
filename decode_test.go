@@ -10,24 +10,10 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"seehuhn.de/go/jpx/internal/codestream"
+	"seehuhn.de/go/membudget"
 )
 
-// testBudget is a Budget that records the total charged.
-type testBudget struct {
-	left  int64
-	total int64
-}
-
-func newTestBudget(limit int64) *testBudget { return &testBudget{left: limit} }
-
-func (b *testBudget) Charge(n int) error {
-	if int64(n) > b.left {
-		return ErrBudget
-	}
-	b.left -= int64(n)
-	b.total += int64(n)
-	return nil
-}
+func newTestBudget(limit int64) *membudget.Budget { return membudget.New(limit) }
 
 // minimalParams describes the hand-built codestreams used by the tests
 // below: a single tile with a single empty packet per resolution level
@@ -180,11 +166,15 @@ func TestDecodeHostileSize(t *testing.T) {
 		data := minimalCodestream(p)
 		b := newTestBudget(1 << 20)
 		_, err := Decode(bytes.NewReader(data), &Options{Budget: b})
-		if !errors.Is(err, ErrBudget) {
+		if !errors.Is(err, membudget.ErrExceeded) {
 			t.Errorf("%dx%d: got %v, want budget error", p.width, p.height, err)
 		}
-		if b.total > 1<<20 {
-			t.Errorf("%dx%d: charged %d bytes, more than the budget", p.width, p.height, b.total)
+		// the budget is what stopped the decode: a comfortable budget
+		// still fails for the same declared geometry only when the planes
+		// themselves do not fit, i.e. the stop happens before any large
+		// allocation
+		if _, err := Decode(bytes.NewReader(data), &Options{Budget: newTestBudget(1 << 30)}); !errors.Is(err, membudget.ErrExceeded) {
+			t.Errorf("%dx%d with a 1 GiB budget: got %v, want budget error", p.width, p.height, err)
 		}
 	}
 }
@@ -236,7 +226,7 @@ func TestDecodeDefaultBudget(t *testing.T) {
 	// without an explicit budget, a small hostile file is still refused
 	comps := []codestream.ComponentSIZ{{Depth: 8, XRsiz: 1, YRsiz: 1}}
 	data := minimalCodestream(minimalParams{width: 1 << 20, height: 1 << 20, comps: comps, levels: 0})
-	if _, err := Decode(bytes.NewReader(data), nil); !errors.Is(err, ErrBudget) {
+	if _, err := Decode(bytes.NewReader(data), nil); !errors.Is(err, membudget.ErrExceeded) {
 		t.Errorf("got %v, want budget error", err)
 	}
 }
@@ -301,7 +291,7 @@ func FuzzDecode(f *testing.F) {
 				t.Fatalf("channel %+v refers outside the image", ch)
 			}
 		}
-		if _, err := ApplyPalette(img, b); err != nil && !errors.Is(err, ErrBudget) {
+		if _, err := ApplyPalette(img, b); err != nil && !errors.Is(err, membudget.ErrExceeded) {
 			t.Fatalf("ApplyPalette: %v", err)
 		}
 	})

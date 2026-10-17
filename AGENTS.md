@@ -21,9 +21,10 @@ editing.
    our own words and do not cite spec clause numbers.  Format-mandated
    constants (lifting coefficients, MQ probability table, context rules)
    are expressed as code.
-3. **Dependencies.**  Standard library only.  `github.com/google/go-cmp`
-   is allowed in tests.  Anything else needs explicit approval from the
-   maintainer first.
+3. **Dependencies.**  Standard library plus `seehuhn.de/go/membudget`
+   (memory accounting; BSD-3-Clause like this module).
+   `github.com/google/go-cmp` is allowed in tests.  Anything else needs
+   explicit approval from the maintainer first.
 4. **Go 1.27.**  Use modern features freely (`min`/`max`, range-over-func,
    generics, `slices`, `maps`, `iter`).  Backwards compatibility is not a
    concern.
@@ -32,7 +33,7 @@ editing.
    allocate or compute in proportion to *declared* sizes — only in
    proportion to the input actually present.  No `recover()` to hide bugs,
    no arbitrary caps to paper over unbounded loops.  Every input-dependent
-   allocation is charged to the `Budget`.
+   allocation is charged to the `*membudget.Budget`.
 6. **Git.**  Author is `Jochen Voss <voss@seehuhn.de>` (already set in
    `.git/config`).  Every commit message ends with
    `Co-Authored-By: Claude <noreply@anthropic.com>`.  No session links, no
@@ -49,7 +50,7 @@ editing.
 
 ```
 seehuhn.de/go/jpx            public API: Header, Image, ReadHeader, Decode,
-                             Encode, Options, Budget, helpers
+                             Encode, Options, helpers
 internal/jp2                 JP2/JPX box reader and writer (ihdr, colr, cdef,
                              pclr, cmap, rreq, jp2c, ftbl skipping, ...)
 internal/codestream          marker segments: SIZ, COD, COC, QCD, QCC, RGN,
@@ -73,7 +74,8 @@ states what it does and what it assumes about its inputs.
 ## Public API (target shape; refine, don't drift)
 
 ```go
-type Budget interface{ Charge(bytes int) error }   // nil = unlimited
+// memory accounting uses *membudget.Budget; nil = unlimited (or the
+// default allowance in Decode)
 
 type Header struct {
     Width, Height int          // reference grid size after image offset
@@ -88,7 +90,7 @@ type Component struct{ Depth int; Signed bool; DX, DY int }
 type Channel struct{ Component int; Kind ChannelKind; Assoc int }
 type ColorSpec struct{ Method, Precedence, Approx, Enumerated int; ICC []byte }
 
-func ReadHeader(r io.Reader, budget Budget) (*Header, error)
+func ReadHeader(r io.Reader, budget *membudget.Budget) (*Header, error)
 func Decode(r io.Reader, opt *Options) (*Image, error)   // Options{Budget, Reduce}
 func Encode(w io.Writer, img *Image, p *EncodeParams) error
 ```

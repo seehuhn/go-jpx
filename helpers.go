@@ -6,6 +6,8 @@ package jpx
 import (
 	"errors"
 	"math"
+
+	"seehuhn.de/go/membudget"
 )
 
 // ApplyPalette resolves the palette of img: the result has one plane per
@@ -15,7 +17,7 @@ import (
 // describe the channels.  Images without a palette are returned
 // unchanged.  The new planes are charged to the budget, which may be
 // nil.
-func ApplyPalette(img *Image, budget Budget) (*Image, error) {
+func ApplyPalette(img *Image, budget *membudget.Budget) (*Image, error) {
 	if img.Palette == nil {
 		return img, nil
 	}

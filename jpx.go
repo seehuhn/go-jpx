@@ -17,7 +17,7 @@
 // conversions on request.
 //
 // The decoder is designed for untrusted input: it is written not to
-// panic, bounds its memory use through a [Budget], and tolerates
+// panic, bounds its memory use through a [membudget.Budget], and tolerates
 // truncated or partially corrupt codestreams by returning the image
 // decoded so far.
 package jpx
@@ -25,15 +25,9 @@ package jpx
 import (
 	"errors"
 	"fmt"
-)
 
-// Budget accounts for working memory while decoding or encoding
-// untrusted data.  Charge is called before every allocation whose size
-// depends on the input, with the number of bytes about to be allocated;
-// returning an error aborts the operation with that error.
-type Budget interface {
-	Charge(bytes int) error
-}
+	"seehuhn.de/go/membudget"
+)
 
 // Component describes one image component as coded in the codestream.
 type Component struct {
@@ -189,21 +183,22 @@ type Image struct {
 // Options controls decoding.
 type Options struct {
 	// Budget bounds the working memory, including the decoded planes;
-	// only the copy of the input itself is exempt.  With a nil Budget
-	// the decoder limits itself to DefaultBudgetBase plus
-	// DefaultBudgetPerByte bytes for every byte of input, so that a small
-	// hostile file cannot exhaust memory; images needing more must be
-	// decoded with an explicit, larger budget.
-	Budget Budget
+	// only the copy of the input itself is exempt.  Every allocation
+	// whose size depends on the input is charged before it is made, and
+	// exceeding the budget aborts decoding with membudget.ErrExceeded.
+	// With a nil Budget the decoder limits itself to DefaultBudgetBase
+	// plus DefaultBudgetPerByte bytes for every byte of input, so that a
+	// small hostile file cannot exhaust memory; images needing more must
+	// be decoded with an explicit, larger budget.
+	Budget *membudget.Budget
 
 	// Reduce discards this many resolution levels: the result has
 	// roughly 1/2^Reduce of the width and height of the full image.
 	Reduce int
 
 	// Workers is the number of goroutines decoding tiles concurrently.
-	// Zero or one decodes sequentially.  The Budget must be safe for
-	// concurrent use when Workers is larger than one, and which of
-	// several errors is reported may then vary between runs.
+	// Zero or one decodes sequentially.  With several workers, which of
+	// several errors is reported may vary between runs.
 	Workers int
 }
 
@@ -218,7 +213,9 @@ func unsupported(what string) error {
 	return fmt.Errorf("%w: %s", ErrUnsupported, what)
 }
 
-func chargeFunc(b Budget) func(int) error {
+// chargeFunc returns the charging callback used by the internal packages
+// for a budget, or nil for no accounting.
+func chargeFunc(b *membudget.Budget) func(int) error {
 	if b == nil {
 		return nil
 	}

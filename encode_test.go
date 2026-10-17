@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
-	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"seehuhn.de/go/membudget"
 )
 
 // testImage builds a synthetic image with smooth gradients, an edge and
@@ -410,7 +410,7 @@ func TestEncodeHostileParams(t *testing.T) {
 	}
 	b := newTestBudget(1 << 20)
 	err := Encode(&buf, img, &EncodeParams{Layers: 60000, Budget: b})
-	if !errors.Is(err, ErrBudget) {
+	if !errors.Is(err, membudget.ErrExceeded) {
 		t.Errorf("60000 layers with a small budget: got %v, want budget error", err)
 	}
 }
@@ -607,15 +607,15 @@ func TestDecodeWorkers(t *testing.T) {
 
 		// a budget that suffices sequentially also suffices concurrently,
 		// and one that does not stops the concurrent decode as well
-		seq := &syncBudget{left: 64 << 20}
+		seq := membudget.New(64 << 20)
 		if _, err := Decode(bytes.NewReader(data), &Options{Budget: seq}); err != nil {
 			t.Fatal(err)
 		}
-		used := 64<<20 - seq.left
-		if _, err := Decode(bytes.NewReader(data), &Options{Workers: 4, Budget: &syncBudget{left: 2 * used}}); err != nil {
+		used := 64<<20 - seq.Available()
+		if _, err := Decode(bytes.NewReader(data), &Options{Workers: 4, Budget: membudget.New(2 * used)}); err != nil {
 			t.Errorf("twice the sequential budget was not enough with workers: %v", err)
 		}
-		if _, err := Decode(bytes.NewReader(data), &Options{Workers: 4, Budget: &syncBudget{left: used / 4}}); !errors.Is(err, ErrBudget) {
+		if _, err := Decode(bytes.NewReader(data), &Options{Workers: 4, Budget: membudget.New(used / 4)}); !errors.Is(err, membudget.ErrExceeded) {
 			t.Errorf("a quarter of the sequential budget: got %v, want budget error", err)
 		}
 
@@ -624,20 +624,4 @@ func TestDecodeWorkers(t *testing.T) {
 			t.Errorf("truncated input with workers: %v", err)
 		}
 	}
-}
-
-// syncBudget is a concurrency-safe budget for tests.
-type syncBudget struct {
-	mu   sync.Mutex
-	left int64
-}
-
-func (b *syncBudget) Charge(n int) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if int64(n) > b.left {
-		return ErrBudget
-	}
-	b.left -= int64(n)
-	return nil
 }

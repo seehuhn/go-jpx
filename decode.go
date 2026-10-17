@@ -16,6 +16,7 @@ import (
 
 	"seehuhn.de/go/jpx/internal/codestream"
 	"seehuhn.de/go/jpx/internal/jp2"
+	"seehuhn.de/go/membudget"
 )
 
 // The default memory budget for callers that do not supply one is a
@@ -28,27 +29,6 @@ const (
 // readChunk is the unit in which input is read, so that the budget is
 // charged before memory is used.
 const readChunk = 64 << 10
-
-type simpleBudget struct {
-	mu   sync.Mutex
-	left int64
-}
-
-func (b *simpleBudget) Charge(n int) error {
-	if n < 0 {
-		return errors.New("jpx: negative allocation")
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if int64(n) > b.left {
-		return ErrBudget
-	}
-	b.left -= int64(n)
-	return nil
-}
-
-// ErrBudget is returned when decoding would exceed the memory budget.
-var ErrBudget = errors.New("jpx: memory budget exceeded")
 
 // readAll reads r to the end, charging the budget as the data arrives.
 func readAll(r io.Reader, charge func(int) error) ([]byte, error) {
@@ -97,8 +77,7 @@ func Decode(r io.Reader, opt *Options) (*Image, error) {
 		return nil, err
 	}
 	if charge == nil {
-		b := &simpleBudget{left: DefaultBudgetBase + DefaultBudgetPerByte*int64(len(data))}
-		charge = b.Charge
+		charge = membudget.New(DefaultBudgetBase + DefaultBudgetPerByte*int64(len(data))).Charge
 	}
 
 	br := bytes.NewReader(data)

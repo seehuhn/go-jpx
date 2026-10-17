@@ -76,12 +76,13 @@ sYCC to RGB) are provided as separate functions.
 ## Memory
 
 Every allocation whose size depends on the input is charged to the
-`Budget` passed in `Options` before it is made, including the decoded
-planes.  Without a budget the decoder allows itself `DefaultBudgetBase`
-plus `DefaultBudgetPerByte` bytes per input byte (64 MiB + 256·x), so a
-small hostile file cannot exhaust memory; images that legitimately need
-more must be decoded with an explicit budget.  The `Budget` interface is
-satisfied by `seehuhn.de/go/membudget`.
+`*membudget.Budget` (from `seehuhn.de/go/membudget`) passed in `Options`
+before it is made, including the decoded planes.  Without a budget the
+decoder allows itself `DefaultBudgetBase` plus `DefaultBudgetPerByte`
+bytes per input byte (64 MiB + 256·x), so a small hostile file cannot
+exhaust memory; images that legitimately need more must be decoded with
+an explicit budget.  Exceeding the budget fails with
+`membudget.ErrExceeded`.
 
 Work is bounded by the input as well: packets are only parsed while data
 is present, structures for precincts and code-blocks are created when

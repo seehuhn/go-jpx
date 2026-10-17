@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"seehuhn.de/go/membudget"
 )
 
 func TestApplyPalette(t *testing.T) {
@@ -60,7 +61,7 @@ func TestApplyPalette(t *testing.T) {
 	}
 
 	// the new planes are charged to the budget
-	if _, err := ApplyPalette(img, newTestBudget(8)); !errors.Is(err, ErrBudget) {
+	if _, err := ApplyPalette(img, newTestBudget(8)); !errors.Is(err, membudget.ErrExceeded) {
 		t.Errorf("tiny budget: got %v, want budget error", err)
 	}
 	// inconsistent images are rejected, not mishandled

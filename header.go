@@ -10,6 +10,7 @@ import (
 
 	"seehuhn.de/go/jpx/internal/codestream"
 	"seehuhn.de/go/jpx/internal/jp2"
+	"seehuhn.de/go/membudget"
 )
 
 // ReadHeader parses the file structure and the main codestream header of
@@ -18,10 +19,10 @@ import (
 // also reports images whose precision exceeds what the decoder supports.
 //
 // Memory use is bounded by the size of the header boxes and marker
-// segments actually read.  A nil budget means that only this implicit
-// bound applies.  JPX files whose codestream is given by a fragment
-// table need an r that implements io.ReaderAt.
-func ReadHeader(r io.Reader, budget Budget) (*Header, error) {
+// segments actually read, and charged to budget, which may be nil.  JPX
+// files whose codestream is given by a fragment table need an r that
+// implements io.ReaderAt.
+func ReadHeader(r io.Reader, budget *membudget.Budget) (*Header, error) {
 	charge := chargeFunc(budget)
 	wrapper, cs, err := jp2.Read(r, charge)
 	if err != nil {

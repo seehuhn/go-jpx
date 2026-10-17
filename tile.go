@@ -22,8 +22,9 @@ type tileDecoder struct {
 	img    *Image
 	charge func(int) error
 	// budgetErr records the first error returned by the budget.  Errors
-	// from corrupt data are tolerated, budget errors are not, and the two
-	// can only be told apart here because a Budget may return any error.
+	// from corrupt data are tolerated, budget errors are not; recording
+	// them here keeps the distinction independent of how the internal
+	// packages wrap errors.
 	budgetErr error
 	ppm       [][]byte // packed packet headers per tile-part, if PPM is used
 

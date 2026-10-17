@@ -11,28 +11,11 @@ import (
 	"image/color"
 	"image/png"
 	"os"
-	"sync"
 	"time"
 
 	"seehuhn.de/go/jpx"
+	"seehuhn.de/go/membudget"
 )
-
-// budget limits the memory available to the decoder.  It is safe for
-// concurrent use, as decoding with several workers requires.
-type budget struct {
-	mu   sync.Mutex
-	left int64
-}
-
-func (b *budget) Charge(n int) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if n < 0 || int64(n) > b.left {
-		return jpx.ErrBudget
-	}
-	b.left -= int64(n)
-	return nil
-}
 
 // runDecode implements the decode subcommand.
 func runDecode(args []string) error {
@@ -57,7 +40,7 @@ func runDecode(args []string) error {
 
 	opt := &jpx.Options{Reduce: *reduce, Workers: *workers}
 	if *mib > 0 {
-		opt.Budget = &budget{left: int64(*mib) << 20}
+		opt.Budget = membudget.New(int64(*mib) << 20)
 	}
 	start := time.Now()
 	img, err := jpx.Decode(f, opt)
