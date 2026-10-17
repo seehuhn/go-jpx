@@ -578,6 +578,8 @@ func TestDecodeWorkers(t *testing.T) {
 		{ResStart: 0, ResEnd: 6, CompStart: 0, CompEnd: 3, LayerEnd: 2, Progression: CPRL},
 	}
 	for _, p := range []EncodeParams{
+		{}, // a single tile: the workers share its code-blocks
+		{Lossy: true, Layers: 3, CodeBlockWidth: 16, CodeBlockHeight: 16},
 		{TileWidth: 32, TileHeight: 40, Layers: 2},
 		{TileWidth: 32, TileHeight: 40, PackedHeaders: PackedInMain, TileParts: 2},
 		{TileWidth: 32, TileHeight: 40, PackedHeaders: PackedInTile, TileParts: 3, Layers: 2, ProgressionChanges: poc},

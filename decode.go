@@ -126,13 +126,15 @@ func Decode(r io.Reader, opt *Options) (*Image, error) {
 }
 
 // decodeTiles decodes all tiles, concurrently when more than one worker
-// is requested.  Every worker has its own buffers; the output planes are
-// shared, with each tile writing to its own region.
+// is requested.  With at least as many tiles as workers, the workers
+// decode whole tiles, each with its own buffers and writing to its own
+// region of the shared output planes; otherwise the tiles are decoded
+// one after the other and the workers share the code-blocks of each.
 func decodeTiles(m *codestream.MainHeader, img *Image, charge func(int) error, parts map[int][]tilePart, workers int) error {
 	indices := slices.Sorted(maps.Keys(parts))
-	workers = max(1, min(workers, len(indices)))
-	if workers == 1 {
-		dec := newTileDecoder(m, img, charge)
+	workers = max(1, workers)
+	if workers > len(indices) {
+		dec := newTileDecoder(m, img, charge, workers)
 		for _, idx := range indices {
 			if err := dec.decodeTile(idx, parts[idx]); err != nil {
 				return err
@@ -149,7 +151,7 @@ func decodeTiles(m *codestream.MainHeader, img *Image, charge func(int) error, p
 	)
 	// the packed packet headers of the main header are parsed once and
 	// shared read-only by all workers
-	shared := newTileDecoder(m, img, charge)
+	shared := newTileDecoder(m, img, charge, 1)
 	if err := shared.loadPPM(); err != nil {
 		return err
 	}
@@ -157,7 +159,7 @@ func decodeTiles(m *codestream.MainHeader, img *Image, charge func(int) error, p
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			dec := newTileDecoder(m, img, charge)
+			dec := newTileDecoder(m, img, charge, 1)
 			dec.ppm = shared.ppm
 			for {
 				i := int(next.Add(1) - 1)

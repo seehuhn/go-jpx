@@ -96,14 +96,26 @@ func (s *blockState) setSignificant(i, y int, neg bool) {
 // coefficient at state index i in row y.
 func (s *blockState) signContext(i, y int) (ctx, xor uint8) {
 	st := s.st
-	hc := contribution(signState(st[i-1]), signState(st[i+1]))
-	dn := 0
+	hc := pairContribution[st[i-1]&3][st[i+1]&3]
+	var dn uint8
 	if !s.causal || y&3 != 3 {
-		dn = signState(st[i+s.stride])
+		dn = st[i+s.stride] & 3
 	}
-	vc := contribution(signState(st[i-s.stride]), dn)
+	vc := pairContribution[st[i-s.stride]&3][dn]
 	e := &scTable[hc+1][vc+1]
 	return e.ctx, e.xor
+}
+
+// pairContribution gives the sign contribution (-1, 0 or 1) of a pair of
+// opposite neighbours from their low state bits (significance and sign).
+var pairContribution [4][4]int
+
+func init() {
+	for a := range 4 {
+		for b := range 4 {
+			pairContribution[a][b] = contribution(signState(uint8(a)), signState(uint8(b)))
+		}
+	}
 }
 
 // runLengthApplies reports whether the four coefficients of the column

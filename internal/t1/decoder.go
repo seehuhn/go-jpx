@@ -152,11 +152,11 @@ func (d *Decoder) sigPass(p int) {
 	for y0 := 0; y0 < h; y0 += 4 {
 		y1 := min(y0+4, h)
 		for x := range w {
-			if y1-y0 == 4 && d.columnIdle(d.index(x, y0)) {
+			i := d.index(x, y0)
+			if y1-y0 == 4 && d.columnIdle(i) {
 				continue
 			}
-			for y := y0; y < y1; y++ {
-				i := d.index(x, y)
+			for y := y0; y < y1; y, i = y+1, i+d.stride {
 				if st[i]&stSig != 0 || nb[i] == 0 {
 					continue
 				}
@@ -175,8 +175,8 @@ func (d *Decoder) sigPassRaw(p int) {
 	for y0 := 0; y0 < h; y0 += 4 {
 		y1 := min(y0+4, h)
 		for x := range w {
-			for y := y0; y < y1; y++ {
-				i := d.index(x, y)
+			i := d.index(x, y0)
+			for y := y0; y < y1; y, i = y+1, i+d.stride {
 				if st[i]&stSig != 0 || nb[i] == 0 {
 					continue
 				}
@@ -207,11 +207,11 @@ func (d *Decoder) refPass(p int) {
 	for y0 := 0; y0 < h; y0 += 4 {
 		y1 := min(y0+4, h)
 		for x := range w {
-			if y1-y0 == 4 && d.columnInsignificant(d.index(x, y0)) {
+			i := d.index(x, y0)
+			if y1-y0 == 4 && d.columnInsignificant(i) {
 				continue
 			}
-			for y := y0; y < y1; y++ {
-				i := d.index(x, y)
+			for y := y0; y < y1; y, i = y+1, i+d.stride {
 				if st[i]&(stSig|stVisited) != stSig {
 					continue
 				}
@@ -236,8 +236,8 @@ func (d *Decoder) refPassRaw(p int) {
 	for y0 := 0; y0 < h; y0 += 4 {
 		y1 := min(y0+4, h)
 		for x := range w {
-			for y := y0; y < y1; y++ {
-				i := d.index(x, y)
+			i := d.index(x, y0)
+			for y := y0; y < y1; y, i = y+1, i+d.stride {
 				if st[i]&(stSig|stVisited) != stSig {
 					continue
 				}

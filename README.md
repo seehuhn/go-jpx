@@ -54,8 +54,9 @@ sYCC to RGB) are provided as separate functions.
   magnitude bit-planes (which happens for depths above about 27 bits, or
   with large region-of-interest shifts), are rejected as unsupported.
   The encoder accepts depths up to 24 bits.
-- Decoding is single-threaded unless `Options.Workers` asks for concurrent
-  tile decoding.
+- Decoding is single-threaded unless `Options.Workers` asks for
+  concurrency, which is then applied to tiles or, for images with few
+  tiles, to the code-blocks within each tile.
 - Fully decoded irreversible coefficients are reconstructed at the
   middle of their quantisation interval, as the standard suggests; other
   decoders may reconstruct at the lower end, which gives differences of

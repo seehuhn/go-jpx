@@ -7,6 +7,9 @@ import (
 	"errors"
 	"iter"
 	"math"
+	"slices"
+	"sync"
+	"sync/atomic"
 
 	"seehuhn.de/go/jpx/internal/codestream"
 	"seehuhn.de/go/jpx/internal/dwt"
@@ -26,27 +29,40 @@ type tileDecoder struct {
 	// them here keeps the distinction independent of how the internal
 	// packages wrap errors.
 	budgetErr error
+	budgetMu  sync.Mutex
 	ppm       [][]byte // packed packet headers per tile-part, if PPM is used
 
-	t1     *t1.Decoder
-	coefs  []int32 // decoded code-block, fractional-bit representation
-	segBuf []byte
-	segs   []t1.Segment
-	pieces []t2.Piece
+	// workers is the number of goroutines decoding the code-blocks of a
+	// tile-component; one means sequential decoding.  The scratch state
+	// of every goroutine is kept across tiles.
+	workers int
+	pool    []*blockWorker
+	blocks  []blockRef
+	pieces  []t2.Piece
 
 	// one buffer per component, sized for the largest tile-component
 	ibuf [][]int32
 	fbuf [][]float32
 }
 
-func newTileDecoder(m *codestream.MainHeader, img *Image, charge func(int) error) *tileDecoder {
+// blockWorker holds the scratch state for decoding one code-block at a
+// time.
+type blockWorker struct {
+	t1     *t1.Decoder
+	coefs  []int32 // decoded code-block, fractional-bit representation
+	segBuf []byte
+	segs   []t1.Segment
+}
+
+func newTileDecoder(m *codestream.MainHeader, img *Image, charge func(int) error, workers int) *tileDecoder {
 	return &tileDecoder{
-		m:      m,
-		img:    img,
-		charge: charge,
-		t1:     t1.NewDecoder(),
-		ibuf:   make([][]int32, len(m.SIZ.Components)),
-		fbuf:   make([][]float32, len(m.SIZ.Components)),
+		m:       m,
+		img:     img,
+		charge:  charge,
+		workers: max(workers, 1),
+		pool:    []*blockWorker{{t1: t1.NewDecoder()}},
+		ibuf:    make([][]int32, len(m.SIZ.Components)),
+		fbuf:    make([][]float32, len(m.SIZ.Components)),
 	}
 }
 
@@ -55,10 +71,21 @@ func (d *tileDecoder) chargeBytes(n int) error {
 		return nil
 	}
 	err := d.charge(n)
-	if err != nil && d.budgetErr == nil {
-		d.budgetErr = err
+	if err != nil {
+		d.budgetMu.Lock()
+		if d.budgetErr == nil {
+			d.budgetErr = err
+		}
+		d.budgetMu.Unlock()
 	}
 	return err
+}
+
+// failed returns the recorded budget error, if any.
+func (d *tileDecoder) failed() error {
+	d.budgetMu.Lock()
+	defer d.budgetMu.Unlock()
+	return d.budgetErr
 }
 
 // decodeTile decodes one tile from its tile-parts and stores the samples
@@ -241,6 +268,9 @@ func (d *tileDecoder) reconstruct(tile *t2.Tile, c int, tc *t2.TileComp) error {
 		Predictable: tc.Style.PredictableTermination,
 		SegSymbols:  tc.Style.SegmentationSymbols,
 	}
+	// collect the blocks with data; every block covers its own part of
+	// the buffer, so they can be decoded in any order or concurrently
+	blocks := d.blocks[:0]
 	for _, res := range tc.Res[:levels+1] {
 		for _, p := range res.Precincts {
 			if p == nil {
@@ -255,14 +285,34 @@ func (d *tileDecoder) reconstruct(tile *t2.Tile, c int, tc *t2.TileComp) error {
 						// decoding the padding instead would produce noise.
 						continue
 					}
-					if err := d.decodeBlock(c, tc, res, pb.Band, cb, style, r); err != nil {
-						if d.budgetErr != nil || errors.Is(err, ErrUnsupported) {
+					if len(blocks) == cap(blocks) {
+						// grow in charged steps; the list is reused for every tile
+						if err := d.chargeBytes(24 * max(cap(blocks), 64)); err != nil {
 							return err
 						}
-						// corrupt block data: leave the block empty
-						continue
+						blocks = slices.Grow(blocks, max(cap(blocks), 64))
 					}
+					blocks = append(blocks, blockRef{res, pb.Band, cb})
 				}
+			}
+		}
+	}
+	d.blocks = blocks
+	decode := func(w *blockWorker, b blockRef) error {
+		err := d.decodeBlock(w, c, tc, b.res, b.band, b.cb, style, r)
+		if err != nil && (d.failed() != nil || errors.Is(err, ErrUnsupported)) {
+			return err
+		}
+		return nil // corrupt block data: leave the block empty
+	}
+	if d.workers > 1 && len(blocks) > 1 {
+		if err := d.decodeBlocksConcurrently(blocks, decode); err != nil {
+			return err
+		}
+	} else {
+		for _, b := range blocks {
+			if err := decode(d.pool[0], b); err != nil {
+				return err
 			}
 		}
 	}
@@ -275,29 +325,90 @@ func (d *tileDecoder) reconstruct(tile *t2.Tile, c int, tc *t2.TileComp) error {
 	return nil
 }
 
-// decodeBlock decodes one code-block and places its dequantised
-// coefficients into the component buffer covering rect r.
-func (d *tileDecoder) decodeBlock(c int, tc *t2.TileComp, res *t2.Resolution, band *t2.Band, cb *t2.CodeBlock, style t1.Style, r dwt.Rect) error {
-	w, h := cb.Bounds.Dx(), cb.Bounds.Dy()
-	if cap(d.coefs) < w*h {
+// blockRef identifies a code-block to decode.
+type blockRef struct {
+	res  *t2.Resolution
+	band *t2.Band
+	cb   *t2.CodeBlock
+}
+
+// decodeBlocksConcurrently decodes the blocks on up to d.workers
+// goroutines, each with its own scratch state from the pool, and returns
+// the first error.
+func (d *tileDecoder) decodeBlocksConcurrently(blocks []blockRef, decode func(*blockWorker, blockRef) error) error {
+	n := min(d.workers, len(blocks))
+	for len(d.pool) < n {
+		// a decoder's working state is bounded by the largest block
+		if err := d.chargeBytes(blockWorkerSize); err != nil {
+			return err
+		}
+		d.pool = append(d.pool, &blockWorker{t1: t1.NewDecoder()})
+	}
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+		next     atomic.Int64
+	)
+	for _, w := range d.pool[:n] {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1) - 1)
+				if i >= len(blocks) {
+					return
+				}
+				mu.Lock()
+				stop := firstErr != nil
+				mu.Unlock()
+				if stop {
+					return
+				}
+				if err := decode(w, blocks[i]); err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					mu.Unlock()
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return firstErr
+}
+
+// blockWorkerSize is the memory charged for the fixed-size scratch state
+// of one block worker: the tier-1 decoder's state arrays and the
+// coefficient buffer.
+const blockWorkerSize = 8 * t1.MaxBlockArea
+
+// decodeBlock decodes one code-block with the scratch state of w and
+// places its dequantised coefficients into the component buffer covering
+// rect r.
+func (d *tileDecoder) decodeBlock(w *blockWorker, c int, tc *t2.TileComp, res *t2.Resolution, band *t2.Band, cb *t2.CodeBlock, style t1.Style, r dwt.Rect) error {
+	bw, bh := cb.Bounds.Dx(), cb.Bounds.Dy()
+	if cap(w.coefs) < bw*bh {
 		if err := d.chargeBytes(4 * t1.MaxBlockArea); err != nil {
 			return err
 		}
-		d.coefs = make([]int32, t1.MaxBlockArea)
+		w.coefs = make([]int32, t1.MaxBlockArea)
 	}
-	coefs := d.coefs[:w*h]
+	coefs := w.coefs[:bw*bh]
 	planes := tc.TotalPlanes(band) - cb.ZeroPlanes
 	if planes > t1.MaxPlanes {
 		return unsupported("more than 30 magnitude bit-planes in a code-block")
 	}
-	if n := cb.DataLen(); n > cap(d.segBuf) {
+	if n := cb.DataLen(); n > cap(w.segBuf) {
 		if err := d.chargeBytes(n); err != nil {
 			return err
 		}
-		d.segBuf = make([]byte, 0, n)
+		w.segBuf = make([]byte, 0, n)
 	}
-	d.segBuf, d.segs = cb.Data(d.segBuf, d.segs)
-	if err := d.t1.Decode(coefs, w, h, band.Orient, style, planes, d.segs); err != nil {
+	w.segBuf, w.segs = cb.Data(w.segBuf, w.segs)
+	if err := w.t1.Decode(coefs, bw, bh, band.Orient, style, planes, w.segs); err != nil {
 		return err
 	}
 
@@ -322,10 +433,10 @@ func (d *tileDecoder) decodeBlock(c int, tc *t2.TileComp, res *t2.Resolution, ba
 	shift := tc.ROIShift
 	if tc.Style.Reversible {
 		buf := d.ibuf[c]
-		for y := range h {
+		for y := range bh {
 			row := buf[(by+y)*stride+bx:]
-			for x := range w {
-				v := coefs[y*w+x]
+			for x := range bw {
+				v := coefs[y*bw+x]
 				if shift > 0 {
 					v = roiDescale(v, shift)
 				}
@@ -341,10 +452,10 @@ func (d *tileDecoder) decodeBlock(c int, tc *t2.TileComp, res *t2.Resolution, ba
 		rb := tc.Depth + band.Gain
 		delta := math.Ldexp(1+float64(band.Mu)/2048, rb-band.Epsilon)
 		scale := float32(delta / 2)
-		for y := range h {
+		for y := range bh {
 			row := buf[(by+y)*stride+bx:]
-			for x := range w {
-				v := coefs[y*w+x]
+			for x := range bw {
+				v := coefs[y*bw+x]
 				if shift > 0 {
 					v = roiDescale(v, shift)
 				}

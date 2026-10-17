@@ -196,9 +196,11 @@ type Options struct {
 	// roughly 1/2^Reduce of the width and height of the full image.
 	Reduce int
 
-	// Workers is the number of goroutines decoding tiles concurrently.
-	// Zero or one decodes sequentially.  With several workers, which of
-	// several errors is reported may vary between runs.
+	// Workers is the number of goroutines used for decoding: they work on
+	// whole tiles when the image has enough of them, and on the
+	// code-blocks of each tile otherwise.  Zero or one decodes
+	// sequentially.  With several workers, which of several errors is
+	// reported may vary between runs.
 	Workers int
 }
 
