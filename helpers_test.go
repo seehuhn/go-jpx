@@ -4,6 +4,8 @@
 package jpx
 
 import (
+	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -82,4 +84,19 @@ func TestSYCCToRGB(t *testing.T) {
 	if err := SYCCToRGB(testImage(2, 2, gray(8), 1)); err == nil {
 		t.Error("single plane accepted")
 	}
+}
+
+func ExampleReadHeader() {
+	img := testImage(8, 8, rgb(8), 1)
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, &EncodeParams{Wrapper: true}); err != nil {
+		panic(err)
+	}
+	h, err := ReadHeader(&buf, nil)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%dx%d, %d components, %d colour channels, enumerated colour space %d\n",
+		h.Width, h.Height, len(h.Components), countColorChannels(h), h.ColorSpecs[0].Enumerated)
+	// Output: 8x8, 3 components, 3 colour channels, enumerated colour space 16
 }

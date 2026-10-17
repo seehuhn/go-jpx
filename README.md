@@ -39,10 +39,11 @@ Encoder:
 
 - Lossless (5/3 + RCT) and lossy (9/7 + ICT with a quality setting),
   quality layers with rate-distortion optimised truncation (optionally
-  with target rates), tiling, precincts, code-block sizes and coding
-  styles, all progression orders, SOP/EPH, region of interest, bare
-  codestream or JP2 wrapper with colour specification, channel definition
-  and palette boxes.
+  with target rates), tiling and tile-parts, precincts, code-block sizes
+  and coding styles, all progression orders and progression order
+  changes, packed packet headers (PPT, PPM), SOP/EPH, region of interest,
+  bare codestream or JP2 wrapper with colour specification, channel
+  definition and palette boxes.
 
 Helpers for the conversions a caller usually wants (palette expansion,
 sYCC to RGB) are provided as separate functions.
@@ -59,6 +60,9 @@ sYCC to RGB) are provided as separate functions.
   middle of their quantisation interval, as the standard suggests; other
   decoders may reconstruct at the lower end, which gives differences of
   ±1 in a small fraction of samples.
+- PPT marker segments are numbered continuously across the tile-parts
+  of a tile, which is what widely used decoders expect; the decoder
+  accepts both this and per-tile-part numbering.
 - Tolerated irregularities seen in files in circulation: more coding
   passes than bit-planes (surplus passes are ignored), zero bit-plane
   counts at or above the number of planes (the block is empty), code
