@@ -14,6 +14,16 @@ import (
 // representation.
 const MaxPlanes = 30
 
+// MaxPasses returns the number of coding passes that code planes
+// magnitude bit-planes of a code-block.  Decode ignores any further
+// passes.
+func MaxPasses(planes int) int {
+	if planes <= 0 {
+		return 0
+	}
+	return 3*planes - 2
+}
+
 // MaxBlockSize is the largest code-block width or height, and
 // MaxBlockArea the largest number of coefficients in a block.  Both
 // follow from the limits on the code-block size exponents in the
@@ -79,7 +89,7 @@ func (d *Decoder) Decode(out []int32, w, h int, band Band, style Style, planes i
 		clear(out[:w*h])
 		return nil
 	}
-	maxPasses := 3*planes - 2
+	maxPasses := MaxPasses(planes)
 	plane := planes - 1
 	pass := 0
 	for _, seg := range segs {

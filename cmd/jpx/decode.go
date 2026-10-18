@@ -21,7 +21,7 @@ import (
 func runDecode(args []string) error {
 	fs := flag.NewFlagSet("decode", flag.ExitOnError)
 	reduce := fs.Int("reduce", 0, "number of resolution levels to discard")
-	mib := fs.Int("budget", 0, "memory budget in MiB (0 for the default)")
+	mib := fs.Int("budget", 0, "memory budget in MiB (0 for no limit)")
 	workers := fs.Int("workers", 1, "number of tiles decoded concurrently")
 	asPNG := fs.Bool("png", false, "write a PNG file (default)")
 	asPGX := fs.Bool("pgx", false, "write one PGX file per component")

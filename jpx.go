@@ -17,9 +17,9 @@
 // conversions on request.
 //
 // The decoder is designed for untrusted input: it is written not to
-// panic, bounds its memory use through a [membudget.Budget], and tolerates
-// truncated or partially corrupt codestreams by returning the image
-// decoded so far.
+// panic, bounds its memory use and work through a [membudget.Budget],
+// and tolerates truncated or partially corrupt codestreams by returning
+// the image decoded so far.
 package jpx
 
 import (
@@ -183,13 +183,13 @@ type Image struct {
 // Options controls decoding.
 type Options struct {
 	// Budget bounds the working memory, including the copy of the input
-	// and the decoded planes.  Every allocation
+	// and the decoded planes, and the decoding work.  Every allocation
 	// whose size depends on the input is charged before it is made, and
-	// exceeding the budget aborts decoding with membudget.ErrExceeded.
-	// With a nil Budget the decoder limits itself to DefaultBudgetBase
-	// plus DefaultBudgetPerByte bytes for every byte of input, so that a
-	// small hostile file cannot exhaust memory; images needing more must
-	// be decoded with an explicit, larger budget.
+	// decoding work is charged at one byte per coefficient per coding
+	// pass, so that a budget bounds the CPU time as well, at a few
+	// nanoseconds per charged byte.  Exceeding the budget aborts decoding
+	// with membudget.ErrExceeded.  A nil Budget imposes no limit; callers
+	// decoding untrusted input must supply one.
 	Budget *membudget.Budget
 
 	// Reduce discards this many resolution levels: the result has

@@ -16,14 +16,6 @@ import (
 
 	"seehuhn.de/go/jpx/internal/codestream"
 	"seehuhn.de/go/jpx/internal/jp2"
-	"seehuhn.de/go/membudget"
-)
-
-// The default memory budget for callers that do not supply one is a
-// fixed allowance plus a multiple of the input size.
-const (
-	DefaultBudgetBase    = 64 << 20
-	DefaultBudgetPerByte = 256
 )
 
 // readChunk is the unit in which input is read, so that the budget is
@@ -66,7 +58,8 @@ func readAll(r io.Reader, charge func(int) error) ([]byte, error) {
 // Decode reads a JPEG 2000 image from r.  Truncated or partially corrupt
 // codestreams produce the image decoded so far; an error is returned
 // only when the data cannot be interpreted at all or when a limit is
-// exceeded.
+// exceeded.  Without a budget in opt, memory use and decoding work are
+// not limited; untrusted input should be decoded with a budget.
 func Decode(r io.Reader, opt *Options) (*Image, error) {
 	if opt == nil {
 		opt = &Options{}
@@ -75,16 +68,10 @@ func Decode(r io.Reader, opt *Options) (*Image, error) {
 		return nil, errors.New("jpx: negative reduction")
 	}
 
-	// The input is read first.  Without a caller-supplied budget the
-	// decoder limits itself to a fixed allowance plus a multiple of the
-	// input size, so that small hostile files cannot exhaust memory.
 	charge := chargeFunc(opt.Budget)
 	data, err := readAll(r, charge)
 	if err != nil {
 		return nil, err
-	}
-	if charge == nil {
-		charge = membudget.New(DefaultBudgetBase + DefaultBudgetPerByte*int64(len(data))).Charge
 	}
 
 	br := bytes.NewReader(data)

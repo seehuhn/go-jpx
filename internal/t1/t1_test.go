@@ -365,3 +365,13 @@ func TestNeighbourhoodCounts(t *testing.T) {
 		}
 	}
 }
+
+func TestMaxPasses(t *testing.T) {
+	for _, c := range []struct{ planes, want int }{
+		{-3, 0}, {0, 0}, {1, 1}, {2, 4}, {MaxPlanes, 88},
+	} {
+		if got := MaxPasses(c.planes); got != c.want {
+			t.Errorf("MaxPasses(%d) = %d, want %d", c.planes, got, c.want)
+		}
+	}
+}

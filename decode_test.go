@@ -222,15 +222,6 @@ func TestDecodeGarbage(t *testing.T) {
 	}
 }
 
-func TestDecodeDefaultBudget(t *testing.T) {
-	// without an explicit budget, a small hostile file is still refused
-	comps := []codestream.ComponentSIZ{{Depth: 8, XRsiz: 1, YRsiz: 1}}
-	data := minimalCodestream(minimalParams{width: 1 << 20, height: 1 << 20, comps: comps, levels: 0})
-	if _, err := Decode(bytes.NewReader(data), nil); !errors.Is(err, membudget.ErrExceeded) {
-		t.Errorf("got %v, want budget error", err)
-	}
-}
-
 // fuzzSeeds returns encoded images that reach the wrapper, palette,
 // channel definition, tiling and packed header code paths.
 func fuzzSeeds(f *testing.F) [][]byte {
@@ -305,4 +296,22 @@ func FuzzReadHeader(f *testing.F) {
 		b := newTestBudget(min(1<<20+1024*int64(len(data)), 4<<20))
 		_, _ = ReadHeader(bytes.NewReader(data), b)
 	})
+}
+
+// A nil budget imposes no limit, so that a valid, highly compressed
+// image is decoded whatever its ratio of decoded to encoded size.
+func TestDecodeNilBudget(t *testing.T) {
+	img := testImage(3000, 2000, rgb(8), 17)
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, &EncodeParams{Lossy: true, Quality: 1, Rates: []float64{0.005}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("encoded size %d", buf.Len())
+	got, err := Decode(bytes.NewReader(buf.Bytes()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Width != img.Width || got.Height != img.Height || len(got.Planes) != 3 {
+		t.Errorf("got %dx%d with %d planes", got.Width, got.Height, len(got.Planes))
+	}
 }

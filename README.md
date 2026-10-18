@@ -78,20 +78,21 @@ sYCC to RGB) are provided as separate functions.
 
 Every allocation whose size depends on the input is charged to the
 `*membudget.Budget` (from `seehuhn.de/go/membudget`) passed in `Options`
-before it is made, including the decoded planes.  Without a budget the
-decoder allows itself `DefaultBudgetBase` plus `DefaultBudgetPerByte`
-bytes per input byte (64 MiB + 256·x), so a small hostile file cannot
-exhaust memory; images that legitimately need more must be decoded with
-an explicit budget.  Exceeding the budget fails with
-`membudget.ErrExceeded`.
+before it is made, including the decoded planes.  Decoding work is
+charged at one byte per coefficient per coding pass, so the budget also
+bounds CPU time, at roughly a few nanoseconds per charged byte.
+Exceeding the budget fails with `membudget.ErrExceeded`.  Without a
+budget, as with the standard library's image decoders, nothing is
+limited: callers decoding untrusted input must pass one.
 
 Work is bounded by the input as well: packets are only parsed while data
 is present, structures for precincts and code-blocks are created when
 their first packet arrives, tag-tree walks and progression iterators do
 work in proportion to the bits consumed and the precincts present, and
-tiles are decoded one at a time into buffers that are reused.  Scans
-that a hostile file could multiply without supplying data (progression
-order changes) are charged to the budget like memory.
+tiles are decoded one at a time into buffers that are reused.  Work
+that a hostile file could multiply without supplying data (scans for
+progression order changes, coding passes over absent data) is charged
+to the budget like memory.
 
 `hostile_test.go` and `mutate_test.go` hold the regression suite from
 the security review: hand-built hostile codestreams and files, a random

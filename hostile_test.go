@@ -60,10 +60,11 @@ func hostileSeed(def uint64) uint64 {
 	return def
 }
 
-// hostileLimit returns the budget the decoder would give itself for an
-// input of the given size when the caller supplies none.
+// hostileLimit returns a budget for an input of the given size: a fixed
+// allowance plus a multiple of the input size, ample for valid images
+// but small enough to stop hostile ones.
 func hostileLimit(n int) int64 {
-	return DefaultBudgetBase + DefaultBudgetPerByte*int64(n)
+	return 64<<20 + 256*int64(n)
 }
 
 // hostileStats describes one measured operation.
@@ -1350,25 +1351,14 @@ func TestHostileApplyPaletteAmplification(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := slices.Concat(jp2Sig(), jp2Ftyp(), boxOf("jp2h", pclr, cmap), boxOf("jp2c", buf.Bytes()))
-	dec, err := Decode(bytes.NewReader(f), nil)
+	dec, err := Decode(bytes.NewReader(f), &Options{Budget: membudget.New(hostileLimit(len(f)))})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if dec.Palette == nil || len(dec.Channels) != n {
 		t.Fatalf("got palette %v and %d channels", dec.Palette != nil, len(dec.Channels))
 	}
-	var out *Image
-	hs := hostileMeasure(1<<40, func(*membudget.Budget) { out, err = ApplyPalette(dec, nil) })
-	if hs.panicked != nil {
-		t.Fatalf("panic: %v", hs.panicked)
-	}
-	if err == nil || out != nil {
-		t.Errorf("default allowance applied: %d planes, err = %v", len(out.Planes), err)
-	}
-	if limit := hostileLimit(len(f)); hs.alloc > uint64(3*limit) {
-		t.Errorf("ApplyPalette allocated %d bytes, allowance %d", hs.alloc, limit)
-	}
-	hs = hostileMeasure(hostileLimit(len(f)), func(b *membudget.Budget) { out, err = ApplyPalette(dec, b) })
+	hs := hostileMeasure(hostileLimit(len(f)), func(b *membudget.Budget) { _, err = ApplyPalette(dec, b) })
 	hs.check(t, "ApplyPalette with decode-sized budget")
 	if !hostileExceeded(err) {
 		t.Errorf("decode-sized budget: err = %v, want budget failure", err)
@@ -1592,10 +1582,8 @@ func TestHostileJP2Boxes(t *testing.T) {
 		hs := hostileMeasure(4<<20, func(b *membudget.Budget) { ReadHeader(bytes.NewReader(data), b) })
 		hs.check(t, name+" (header)")
 		hostileDecode(t, name+" (decode)", data, 4<<20, nil)
-		hs = hostileMeasure(0, func(*membudget.Budget) { Decode(noSizeReader{bytes.NewReader(data)}, nil) })
-		if hs.panicked != nil {
-			t.Errorf("%s (no size, nil budget): panic: %v", name, hs.panicked)
-		}
+		hs = hostileMeasure(4<<20, func(b *membudget.Budget) { Decode(noSizeReader{bytes.NewReader(data)}, &Options{Budget: b}) })
+		hs.check(t, name+" (no size)")
 		var img *Image
 		hs = hostileMeasure(4<<20, func(b *membudget.Budget) {
 			var err error
@@ -1713,9 +1701,10 @@ func TestHostileWorkers(t *testing.T) {
 					d = d[:len(d)*3/4]
 				}
 			}
-			a, errA := Decode(bytes.NewReader(d), &Options{})
+			limit := hostileLimit(len(d))
+			a, errA := Decode(bytes.NewReader(d), &Options{Budget: membudget.New(limit)})
 			for _, w := range []int{2, 8, 100} {
-				b, errB := Decode(bytes.NewReader(d), &Options{Workers: w})
+				b, errB := Decode(bytes.NewReader(d), &Options{Workers: w, Budget: membudget.New(limit)})
 				if (errA == nil) != (errB == nil) {
 					t.Errorf("k=%d workers=%d: error mismatch: %v vs %v", k, w, errA, errB)
 					continue
@@ -2059,5 +2048,35 @@ func TestHostileEncodeDecode(t *testing.T) {
 		if t.Failed() {
 			t.FailNow()
 		}
+	}
+}
+
+// Tier-1 work is charged to the budget: blocks declaring many passes
+// over a single data byte are stopped by a budget that covers the
+// memory but not the work.
+func TestHostileTier1WorkCharged(t *testing.T) {
+	const side = 2048
+	q := codestream.Quantization{Style: codestream.QuantNone, GuardBits: 7, Exponents: []int{24}}
+	s := hostileSpecFor(side, side, hostileComps(1, hostileUnit),
+		hostileCOD(0, codestream.LRCP, 1, 15, 15), q)
+	s.addPart(nil, singleLayerPacket(side, side, 64, 164, 1, false))
+	data := s.mustBuild(t)
+	r := hostileDecode(t, "many passes", data, 64<<20, nil)
+	if !hostileExceeded(r.err) {
+		t.Errorf("err = %v, want budget failure", r.err)
+	}
+
+	// a normal image fits a budget of moderate size
+	img := testImage(256, 256, rgb(8), 5)
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, &EncodeParams{}); err != nil {
+		t.Fatal(err)
+	}
+	r = hostileDecode(t, "normal", buf.Bytes(), 16<<20, nil)
+	if r.err != nil {
+		t.Fatalf("normal image: %v", r.err)
+	}
+	if diff := cmp.Diff(img.Planes, r.img.Planes); diff != "" {
+		t.Errorf("round trip failed (-want +got):\n%s", diff)
 	}
 }

@@ -414,6 +414,12 @@ func (d *tileDecoder) decodeBlock(w *blockWorker, c int, tc *t2.TileComp, res *t
 		w.segBuf = make([]byte, 0, n)
 	}
 	w.segBuf, w.segs = cb.Data(w.segBuf, w.segs)
+
+	// Tier-1 work is bounded by the declared passes, not by the data
+	// present, so it is charged to the budget like memory.
+	if err := d.chargeBytes(min(cb.Passes, t1.MaxPasses(planes)) * bw * bh); err != nil {
+		return err
+	}
 	if err := w.t1.Decode(coefs, bw, bh, band.Orient, style, planes, w.segs); err != nil {
 		return err
 	}

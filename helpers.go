@@ -15,22 +15,14 @@ import (
 // palette column.  Channels that read a component directly share the
 // component's plane.  The returned image has no palette; its Components
 // describe the channels.  Images without a palette are returned
-// unchanged.  The new planes are charged to the budget; with a nil
-// budget the function allows itself DefaultBudgetBase plus four times
-// the size of the image's planes, since a palette image normally expands
-// to at most a few colour channels.
+// unchanged.  The new planes are charged to the budget; a nil budget
+// imposes no limit.
 func ApplyPalette(img *Image, budget *membudget.Budget) (*Image, error) {
 	if img.Palette == nil {
 		return img, nil
 	}
-	if budget == nil {
-		size := 0
-		for _, p := range img.Planes {
-			size += 4 * len(p.Pix)
-		}
-		budget = membudget.New(DefaultBudgetBase + 4*int64(size))
-	}
-	if err := budget.Charge(len(img.Channels) * 128); err != nil {
+	charge := chargeFunc(budget)
+	if err := chargeOpt(charge, len(img.Channels)*128); err != nil {
 		return nil, err
 	}
 	pal := img.Palette
@@ -54,7 +46,7 @@ func ApplyPalette(img *Image, budget *membudget.Budget) (*Image, error) {
 			if len(pal.Entries) == 0 {
 				return nil, errors.New("jpx: empty palette")
 			}
-			if err := budget.Charge(4 * len(src.Pix)); err != nil {
+			if err := chargeOpt(charge, 4*len(src.Pix)); err != nil {
 				return nil, err
 			}
 			col := pal.Columns[ch.PaletteColumn]
