@@ -740,7 +740,7 @@ func TestHostileIteratorExtremes(t *testing.T) {
 		w, h := uint32(1+rng.IntN(400)), uint32(1+rng.IntN(400))
 		var x0, y0 uint32
 		if rng.IntN(2) == 0 {
-			x0, y0 = uint32(rng.IntN(1<<32-1-int(w))), uint32(rng.IntN(1<<32-1-int(h)))
+			x0, y0 = rng.Uint32N(math.MaxUint32-w), rng.Uint32N(math.MaxUint32-h)
 		} else {
 			x0, y0 = uint32(rng.IntN(1000)), uint32(rng.IntN(1000))
 		}
@@ -1624,11 +1624,11 @@ func TestHostileInputCopy(t *testing.T) {
 // proportion to them.
 func TestHostileHugeOptions(t *testing.T) {
 	f := jp2File(t)
-	r := hostileDecode(t, "workers", f, 1<<40, &Options{Workers: 1 << 40})
+	r := hostileDecode(t, "workers", f, 1<<40, &Options{Workers: math.MaxInt})
 	if r.err != nil {
 		t.Errorf("Workers=2^40: %v", r.err)
 	}
-	r = hostileDecode(t, "reduce", f, 1<<40, &Options{Reduce: 1 << 40})
+	r = hostileDecode(t, "reduce", f, 1<<40, &Options{Reduce: math.MaxInt})
 	if r.err == nil {
 		t.Error("Reduce=2^40 decoded without error")
 	}

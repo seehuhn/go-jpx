@@ -222,7 +222,7 @@ func validateImage(img *Image) error {
 		return errors.New("jpx: nil image")
 	}
 	h := &img.Header
-	if h.Width <= 0 || h.Height <= 0 || h.Width > math.MaxUint32 || h.Height > math.MaxUint32 {
+	if h.Width <= 0 || h.Height <= 0 || uint64(h.Width) > math.MaxUint32 || uint64(h.Height) > math.MaxUint32 {
 		return errors.New("jpx: invalid image size")
 	}
 	if len(h.Components) == 0 || len(h.Components) > 16384 {
@@ -275,7 +275,7 @@ func validateImage(img *Image) error {
 		}
 	}
 	for i, cs := range h.ColorSpecs {
-		if cs.Method < 1 || cs.Method > 255 || cs.Precedence < -128 || cs.Precedence > 127 || cs.Approx < 0 || cs.Approx > 255 || cs.Enumerated < 0 || cs.Enumerated > math.MaxUint32 {
+		if cs.Method < 1 || cs.Method > 255 || cs.Precedence < -128 || cs.Precedence > 127 || cs.Approx < 0 || cs.Approx > 255 || cs.Enumerated < 0 || uint64(cs.Enumerated) > math.MaxUint32 {
 			return fmt.Errorf("jpx: colour specification %d has values out of range", i)
 		}
 	}

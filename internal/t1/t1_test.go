@@ -5,6 +5,7 @@ package t1
 
 import (
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"testing"
 
@@ -238,7 +239,7 @@ func TestPassLengthsSufficient(t *testing.T) {
 
 func TestInvalidGeometry(t *testing.T) {
 	dec := NewDecoder()
-	for _, g := range [][2]int{{0, 1}, {1, 0}, {2048, 1}, {65, 64}, {1 << 32, 1 << 32}} {
+	for _, g := range [][2]int{{0, 1}, {1, 0}, {2048, 1}, {65, 64}, {math.MaxInt, math.MaxInt}} {
 		if err := dec.Decode(make([]int32, 16), g[0], g[1], BandLL, Style{}, 1, nil); err == nil {
 			t.Errorf("geometry %v was accepted", g)
 		}

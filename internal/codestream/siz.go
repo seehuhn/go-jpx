@@ -54,6 +54,10 @@ func (s *SIZ) Validate() error {
 	if s.Xsiz <= s.XOsiz || s.Ysiz <= s.YOsiz {
 		return errors.New("empty image area")
 	}
+	// the geometry is computed in int, which may be 32 bits wide
+	if uint64(s.Xsiz) > math.MaxInt || uint64(s.Ysiz) > math.MaxInt {
+		return errors.New("image coordinates exceed the int range")
+	}
 	if s.XTOsiz > s.XOsiz || s.YTOsiz > s.YOsiz {
 		return errors.New("tile offset exceeds image offset")
 	}

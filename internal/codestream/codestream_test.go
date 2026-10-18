@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"math"
 	"runtime"
 	"testing"
 
@@ -379,7 +380,8 @@ func TestHostile(t *testing.T) {
 		t.Error("NumTiles ok with zero tile size")
 	}
 	s = &SIZ{Xsiz: 0xFFFFFFFF, Ysiz: 0xFFFFFFFF, XTsiz: 1, YTsiz: 1}
-	if nx, ny, ok := s.NumTiles(); !ok || nx != 0xFFFFFFFF || ny != 0xFFFFFFFF {
+	nx, ny, ok := s.NumTiles()
+	if fits := math.MaxInt >= 0xFFFFFFFF; ok != fits || (fits && (uint64(nx) != 0xFFFFFFFF || uint64(ny) != 0xFFFFFFFF)) {
 		t.Errorf("NumTiles = %d %d %v", nx, ny, ok)
 	}
 
