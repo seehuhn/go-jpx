@@ -43,6 +43,21 @@ func TestPGXRoundTrip(t *testing.T) {
 	}
 }
 
+// A component with truncated samples is written at the depth of its
+// plane.
+func TestPGXDeep(t *testing.T) {
+	c := jpx.Component{Depth: 33, Truncation: 9, DX: 1, DY: 1, Width: 1, Height: 1}
+	p := jpx.Plane{Width: 1, Height: 1, Pix: []int32{0x7F0102}}
+	var buf bytes.Buffer
+	if err := writePGX(&buf, c, &p); err != nil {
+		t.Fatal(err)
+	}
+	want := append([]byte("PG ML + 24 1 1\n"), 0x7F, 0x01, 0x02)
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Errorf("got %q, want %q", buf.Bytes(), want)
+	}
+}
+
 func TestPGXTruncated(t *testing.T) {
 	if _, _, err := readPGX(bytes.NewReader([]byte("PG ML + 8 100000 100000\nab"))); err == nil {
 		t.Error("truncated file accepted")
@@ -78,7 +93,7 @@ func TestPNGToImage(t *testing.T) {
 		t.Error("missing opacity channel")
 	}
 
-	back, err := toPNGImage(img)
+	back, err := toPNGImage(img, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

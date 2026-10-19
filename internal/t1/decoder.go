@@ -9,14 +9,16 @@ import (
 	"seehuhn.de/go/jpx/internal/mq"
 )
 
-// MaxPlanes is the largest number of bit-planes a code-block may have.
+// MaxPlanes is the largest number of bit-planes Decode reconstructs.
 // Together with the fractional bit this fills the 32-bit coefficient
-// representation.
+// representation.  Blocks with more planes are decoded for their most
+// significant MaxPlanes planes only.
 const MaxPlanes = 30
 
 // MaxPasses returns the number of coding passes that code planes
 // magnitude bit-planes of a code-block.  Decode ignores any further
-// passes.
+// passes, and for blocks of more than MaxPlanes planes any passes beyond
+// MaxPasses(MaxPlanes).
 func MaxPasses(planes int) int {
 	if planes <= 0 {
 		return 0
@@ -69,13 +71,17 @@ func NewDecoder() *Decoder {
 // fractional-bit representation described in the package documentation.
 // Fewer passes than needed for all planes leave the remaining planes
 // undecoded; the fractional bit then marks the reconstruction mid-point.
+//
+// With more than MaxPlanes planes, only the passes of the most
+// significant MaxPlanes planes are decoded, as if the stream had been
+// truncated after them.  The result then holds the coefficients divided
+// by 2^(planes-MaxPlanes), still with mid-point reconstruction of the
+// planes not decoded.
 func (d *Decoder) Decode(out []int32, w, h int, band Band, style Style, planes int, segs []Segment) error {
 	if !validGeometry(w, h) || len(out) < w*h {
 		return errors.New("t1: invalid code-block geometry")
 	}
-	if planes > MaxPlanes {
-		return errors.New("t1: too many bit-planes")
-	}
+	planes = min(planes, MaxPlanes)
 	d.setup(w, h, band, style.Causal)
 	if cap(d.mag) < w*h {
 		d.mag = make([]uint32, w*h)

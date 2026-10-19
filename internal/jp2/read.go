@@ -28,9 +28,11 @@ var signature = []byte{0, 0, 0, 12, 'j', 'P', ' ', ' ', 0x0D, 0x0A, 0x87, 0x0A}
 // contiguous codestream box, so boxes after it are still parsed.
 //
 // Malformed ancillary boxes inside the header superbox, including a
-// palette with columns deeper than 31 bits, are skipped and leave the
-// corresponding Header field unset.  An error is returned for a
-// bad signature, box framing that cannot be followed, truncated input
+// palette with columns deeper than 38 bits, are skipped and leave the
+// corresponding Header field unset.  Trailing bytes inside a superbox
+// that are too few for a box header are ignored.  An error is returned
+// for a bad signature, box framing that cannot be followed (including a
+// child box that extends past its superbox), truncated input
 // before the codestream, an unusable fragment table when it is the
 // only source of the codestream, or when charge fails.
 //

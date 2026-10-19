@@ -3,6 +3,8 @@
 
 package dwt
 
+import "slices"
+
 // Rect is a half-open rectangle on the coordinate grid of a resolution level.
 type Rect struct{ X0, Y0, X1, Y1 int }
 
@@ -103,8 +105,7 @@ func inverse2D[T any](buf []T, r Rect, levels int, k kernel[T]) {
 		rects = append(rects, cur)
 		cur = Reduce(cur, 1)
 	}
-	for i := len(rects) - 1; i >= 0; i-- {
-		c := rects[i]
+	for _, c := range slices.Backward(rects) {
 		u0, u1, v0, v1 := c.X0, c.X1, c.Y0, c.Y1
 		w, h := u1-u0, v1-v0
 		// horizontal filtering, then vertical

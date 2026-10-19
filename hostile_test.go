@@ -102,13 +102,13 @@ func (s hostileStats) check(t testing.TB, name string) {
 }
 
 // checkFactor is check with an explicit allowance factor.
-func (s hostileStats) checkFactor(t testing.TB, name string, factor uint64) {
+func (s hostileStats) checkFactor(t testing.TB, name string, factor float64) {
 	t.Helper()
 	if s.panicked != nil {
 		t.Errorf("%s: panic: %v", name, s.panicked)
 		return
 	}
-	if want := factor*uint64(max(s.charged, 0)) + hostileSlack; s.alloc > want {
+	if want := uint64(factor*float64(max(s.charged, 0))) + hostileSlack; s.alloc > want {
 		t.Errorf("%s: allocated %d bytes, charged only %d", name, s.alloc, s.charged)
 	}
 }
@@ -258,11 +258,11 @@ func (s *hostileSpec) addPart(poc []codestream.POCEntry, body []byte) {
 // and the same precinct exponents at every resolution (resolutions above
 // zero need exponents of at least one).
 func hostileCOD(levels int, prog codestream.Progression, layers, ppx, ppy int) codestream.COD {
-	c := codestream.COD{Progression: prog, Layers: layers}
-	c.Levels = levels
-	c.CodeBlockW, c.CodeBlockH = 6, 6
-	c.Reversible = true
-	c.PrecinctSizes = make([]codestream.PrecinctSize, levels+1)
+	c := codestream.COD{
+		Progression: prog, Layers: layers,
+		Levels: levels, CodeBlockW: 6, CodeBlockH: 6, Reversible: true,
+		PrecinctSizes: make([]codestream.PrecinctSize, levels+1),
+	}
 	for i := range c.PrecinctSizes {
 		c.PrecinctSizes[i] = codestream.PrecinctSize{PPx: ppx, PPy: ppy}
 		if i > 0 {
@@ -489,6 +489,21 @@ func TestHostileManyTileParts(t *testing.T) {
 	}
 }
 
+// With PPT the tile-part bodies are joined into one stream, which must
+// be charged for the memory it occupies.
+func TestHostilePPTBodies(t *testing.T) {
+	s := hostileBase(64, 64, 1, 1, 1, 0, codestream.LRCP, 15)
+	for i := range 16 {
+		s.parts = append(s.parts, hostilePart{tile: 0, part: i, ppt: [][]byte{{0}}, body: make([]byte, 1<<20+i)})
+	}
+	data := s.mustBuild(t)
+	r := hostileDecode(t, "ppt", data, hostileLimit(len(data)), nil)
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	r.checkFactor(t, "ppt", 1.25)
+}
+
 // Many tiles, each with its own tile-part.
 func TestHostileManyTiles(t *testing.T) {
 	for _, levels := range []int{0, 5, 32} {
@@ -528,6 +543,50 @@ func TestHostileManyRGNManyTiles(t *testing.T) {
 		}
 		data = slices.Concat(data[:i], bytes.Repeat(rgn, nrgn), data[i:])
 		hostileDecode(t, fmt.Sprintf("rgn=%d", nrgn), data, hostileLimit(len(data)), nil)
+	}
+}
+
+// An ROI shift beyond the coefficient range, balanced by as many extra
+// zero bit-planes, leaves every coefficient in the background: the image
+// must decode as it does without the shift.
+func TestHostileROIShift(t *testing.T) {
+	const side = 16
+	q := codestream.Quantization{Style: codestream.QuantNone, GuardBits: 7, Exponents: []int{24}}
+	cod := hostileCOD(0, codestream.LRCP, 1, 15, 15)
+	cod.CodeBlockW, cod.CodeBlockH = 2, 2
+	decode := func(shift, zero int) *Image {
+		s := hostileSpecFor(side, side, hostileComps(1, hostileUnit), cod, q)
+		s.addPart(nil, singleLayerPacketZ(side, side, 4, 7, 16, false, zero))
+		if shift > 0 {
+			s.parts[0].extra = func(w *codestream.Writer) { w.RGN(codestream.RGN{Component: 0, Shift: shift}) }
+		}
+		data := s.mustBuild(t)
+		r := hostileDecode(t, fmt.Sprintf("shift=%d", shift), data, hostileLimit(len(data)), nil)
+		if r.err != nil {
+			t.Fatalf("shift=%d: %v", shift, r.err)
+		}
+		return r.img
+	}
+	want := decode(0, 25)
+	if !slices.ContainsFunc(want.Planes[0].Pix, func(v int32) bool { return v != want.Planes[0].Pix[0] }) {
+		t.Fatal("reference image is flat")
+	}
+	for _, shift := range []int{1, 5, 20, 26, 31, 32, 40, 255} {
+		// background only: the shift adds as many zero bit-planes; the
+		// 5 planes of the block are below 2^shift for shifts from 5
+		if shift >= 5 {
+			got := decode(shift, 25+shift)
+			if d := cmp.Diff(want.Planes, got.Planes); d != "" {
+				t.Errorf("shift=%d, background: image differs (-want +got):\n%s", shift, d)
+			}
+		}
+		// region of interest only: the shift adds as many bit-planes at
+		// the bottom, beyond what the tier-1 decoder reconstructs for
+		// shifts above 25
+		got := decode(shift, 25)
+		if d := cmp.Diff(want.Planes, got.Planes); d != "" {
+			t.Errorf("shift=%d, region of interest: image differs (-want +got):\n%s", shift, d)
+		}
 	}
 }
 
@@ -875,8 +934,19 @@ func TestHostilePrecinctAlloc(t *testing.T) {
 // dlen bytes of pseudo-random data.  With term set, each pass is a
 // segment of its own and carries the length dlen/passes.
 func singleLayerPacket(w, h, cb, passes, dlen int, term bool) []byte {
+	return singleLayerPacketZ(w, h, cb, passes, dlen, term, 0)
+}
+
+// singleLayerPacketZ is singleLayerPacket with zeroPlanes zero bit-planes
+// in every code-block.
+func singleLayerPacketZ(w, h, cb, passes, dlen int, term bool, zeroPlanes int) []byte {
 	cbw, cbh := (w+cb-1)/cb, (h+cb-1)/cb
 	incl, zero := t2.NewTree(cbw, cbh), t2.NewTree(cbw, cbh)
+	for j := range cbh {
+		for i := range cbw {
+			zero.SetValue(i, j, zeroPlanes)
+		}
+	}
 	var bw t2.BitWriter
 	bw.WriteBit(1)
 	var body []byte
@@ -891,22 +961,7 @@ func singleLayerPacket(w, h, cb, passes, dlen int, term bool) []byte {
 		for i := range cbw {
 			incl.Encode(&bw, i, j, 1)
 			zero.EncodeValue(&bw, i, j)
-			// pass count code word
-			switch {
-			case passes == 1:
-				bw.WriteBit(0)
-			case passes == 2:
-				bw.WriteBits(2, 2)
-			case passes <= 5:
-				bw.WriteBits(3, 2)
-				bw.WriteBits(uint32(passes-3), 2)
-			case passes <= 36:
-				bw.WriteBits(0xF, 4)
-				bw.WriteBits(uint32(passes-6), 5)
-			default:
-				bw.WriteBits(0x1FF, 9)
-				bw.WriteBits(uint32(passes-37), 7)
-			}
+			passCountCode(&bw, passes)
 			bw.WriteBit(0) // no Lblock increment
 			if term {
 				for range passes {
@@ -1274,11 +1329,11 @@ func TestHostileJP2Accounting(t *testing.T) {
 		{"1000 ftyp boxes at top level", jp2Top(t, rep(boxOf("ftyp", []byte("jp2 "), []byte{0, 0, 0, 0}, make([]byte, 1024)), 1000))},
 	}
 	for _, c := range cases {
-		// the bit-depth list is built by repeated append and charged
-		// only once, which costs a larger factor
-		factor := uint64(3)
-		if c.name == "bpcc 1MiB" {
-			factor = 6
+		// the entry lists are allocated at their final size
+		factor := 3.0
+		switch c.name {
+		case "bpcc 1MiB", "cmap 1MiB without pclr", "cdef 65535":
+			factor = 1.25
 		}
 		hs := hostileMeasure(1<<40, func(b *membudget.Budget) { ReadHeader(bytes.NewReader(c.file), b) })
 		hs.checkFactor(t, "ReadHeader "+c.name, factor)

@@ -633,10 +633,11 @@ func (r *Reader) nextTilePart() (*TilePart, error) {
 // be nil).  Precedence is tile COC, tile COD, main COC, main COD, and
 // likewise for QCC and QCD.
 //
-// The result is checked for consistency: the quantization must provide
-// enough entries for the number of decomposition levels, and reversible
-// coding must use QuantNone while irreversible coding must not.  Callers can
-// therefore index the exponent and mantissa slices for every subband.
+// The result is checked with [Quantization.Validate], and reversible coding
+// must use QuantNone while irreversible coding must not.  The quantization
+// therefore has at least one entry, with Mantissas parallel to Exponents
+// except for QuantNone, but it may have fewer entries than subbands: callers
+// must map subbands to entries without indexing past the end.
 func Resolve(m *MainHeader, t *TilePart, c int) (CodingStyle, Quantization, error) {
 	if m == nil || m.COD == nil || m.QCD == nil {
 		return CodingStyle{}, Quantization{}, errors.New("incomplete main header")

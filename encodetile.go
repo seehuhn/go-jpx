@@ -18,26 +18,38 @@ type tileData struct {
 	tile *t2.Tile
 	// per component: per resolution: per precinct: per band
 	enc [][][][]*t2.Encoded
-	// blockInfo mirrors enc with the zero bit-plane count of every block
+	// zero mirrors enc with the zero bit-plane count of every block
 	zero [][][][][]int
 }
 
-// encodeTile encodes tile idx and returns its tile-parts.
+// encodeTile encodes tile idx and returns its tile-parts.  The first
+// tile-part carries the coding parameters fitted to the tile's
+// coefficients where they differ from the main header.
 func (e *encoder) encodeTile(idx int) ([]tilePartData, error) {
 	tp := &codestream.TilePart{Index: idx, PartCount: 1}
 	tile, err := t2.NewTile(e.main, []*codestream.TilePart{tp}, idx, t2.Charge(e.charge))
 	if err != nil {
 		return nil, err
 	}
-	td := &tileData{tile: tile}
-	td.enc = make([][][][]*t2.Encoded, len(tile.Comps))
-	td.zero = make([][][][][]int, len(tile.Comps))
-
 	// forward component transform needs all components first
 	bufs, err := e.transformComponents(tile)
 	if err != nil {
 		return nil, err
 	}
+	for c, tc := range tile.Comps {
+		forwardTransform(tc, bufs[c])
+	}
+	if err := e.fitTile(tp, tile, bufs); err != nil {
+		return nil, err
+	}
+	// the tile with the fitted quantization
+	tile, err = t2.NewTile(e.main, []*codestream.TilePart{tp}, idx, t2.Charge(e.charge))
+	if err != nil {
+		return nil, err
+	}
+	td := &tileData{tile: tile}
+	td.enc = make([][][][]*t2.Encoded, len(tile.Comps))
+	td.zero = make([][][][][]int, len(tile.Comps))
 
 	for c, tc := range tile.Comps {
 		if err := e.encodeComponent(td, c, tc, bufs[c]); err != nil {
@@ -85,6 +97,7 @@ func (e *encoder) encodeTile(idx int) ([]tilePartData, error) {
 	}
 	numParts = min(numParts, max(len(packets), 1))
 	parts := make([]tilePartData, numParts)
+	parts[0].header = tp
 	inline := e.p.PackedHeaders == HeadersInline
 	for i, pk := range packets {
 		part := &parts[i*numParts/len(packets)]
@@ -125,9 +138,10 @@ func (e *encoder) transformComponents(tile *t2.Tile) ([]sampleBuffer, error) {
 		plane := &e.img.Planes[c]
 		px0 := ceilDiv(int(siz.XOsiz), tc.DX)
 		py0 := ceilDiv(int(siz.YOsiz), tc.DY)
+		// the DC offset at the scale of the plane
 		var shift int32
 		if !tc.Signed {
-			shift = 1 << uint(tc.Depth-1)
+			shift = int32(int64(1) << uint(tc.Depth-1) >> uint(depthTruncation(tc.Depth)))
 		}
 		if rev {
 			bufs[c].i = make([]int32, n)
@@ -178,18 +192,12 @@ func chargeOpt(charge func(int) error, n int) error {
 	return charge(n)
 }
 
-// encodeComponent transforms, quantises and entropy codes one
-// tile-component.
+// encodeComponent quantises and entropy codes the transformed
+// coefficients of one tile-component.
 func (e *encoder) encodeComponent(td *tileData, c int, tc *t2.TileComp, buf sampleBuffer) error {
-	r := dwt.Rect{X0: tc.Bounds.X0, Y0: tc.Bounds.Y0, X1: tc.Bounds.X1, Y1: tc.Bounds.Y1}
 	levels := tc.Style.Levels
 	rev := tc.Style.Reversible
-	if rev {
-		dwt.Forward53(buf.i, r, levels)
-	} else {
-		dwt.Forward97(buf.f, r, levels)
-	}
-	stride := r.X1 - r.X0
+	stride := tc.Bounds.Dx()
 
 	style := t1.Style{
 		Bypass:      tc.Style.EntropyBypass,
@@ -217,7 +225,22 @@ func (e *encoder) encodeComponent(td *tileData, c int, tc *t2.TileComp, buf samp
 				zero := make([]int, len(pb.Blocks))
 				band := pb.Band
 				bx, by := bandOffset(res, band)
+				// The coefficients of a truncated component are those of
+				// the plane values, trunc planes below the scale of the
+				// full samples that the band's planes refer to.  They are
+				// shifted up and coded with all planes where the coder
+				// allows, so that any decoder recovers them exactly; when
+				// the band has more planes than the coder handles, the
+				// lowest ones are left uncoded instead, like a stream
+				// truncated after the coded passes.  Quantization keeps
+				// the shift within the coder's limit.
 				planes := tc.TotalPlanes(band)
+				dropped := max(0, planes-t1.MaxPlanes)
+				planes -= dropped
+				shift := 0
+				if rev {
+					shift = depthTruncation(tc.Depth) - dropped
+				}
 				for i := range pb.Blocks {
 					cb := &pb.Blocks[i]
 					w, h := cb.Bounds.Dx(), cb.Bounds.Dy()
@@ -226,16 +249,17 @@ func (e *encoder) encodeComponent(td *tileData, c int, tc *t2.TileComp, buf samp
 					y0 := by + cb.Bounds.Y0 - band.Bounds.Y0
 					if rev {
 						for y := range h {
-							copy(block[y*w:(y+1)*w], buf.i[(y0+y)*stride+x0:])
+							row := buf.i[(y0+y)*stride+x0:][:w]
+							for x, v := range row {
+								block[y*w+x] = v << shift
+							}
 						}
 					} else {
-						delta := quantStep(tc, band)
-						inv := float32(1 / delta)
+						inv := quantScale(tc, band)
 						for y := range h {
 							row := buf.f[(y0+y)*stride+x0:][:w]
 							for x, v := range row {
-								q := int32(math.Trunc(float64(v * inv)))
-								block[y*w+x] = q
+								block[y*w+x] = quantise(v, inv)
 							}
 						}
 					}
@@ -254,10 +278,13 @@ func (e *encoder) encodeComponent(td *tileData, c int, tc *t2.TileComp, buf samp
 					bd.Passes = append([]t1.PassInfo(nil), eb.Passes...)
 					zero[i] = eb.ZeroPlanes
 					// weight the distortion by the quantization step and the
-					// synthesis gain so that blocks of different bands compare
+					// synthesis gain so that blocks of different bands and
+					// components compare at the scale of the plane values
 					weight := e.norms[levelOf(res, levels)][int(band.Orient)]
-					if !rev {
-						d := quantStep(tc, band)
+					if rev {
+						weight = math.Ldexp(weight, -2*shift)
+					} else {
+						d := math.Ldexp(quantStep(tc, band), -depthTruncation(tc.Depth))
 						weight *= d * d
 					}
 					for pi := range bd.Passes {
@@ -270,6 +297,124 @@ func (e *encoder) encodeComponent(td *tileData, c int, tc *t2.TileComp, buf samp
 		}
 	}
 	return nil
+}
+
+// forwardTransform applies the forward wavelet transform to the samples
+// of tile-component tc in place.
+func forwardTransform(tc *t2.TileComp, buf sampleBuffer) {
+	r := dwt.Rect{X0: tc.Bounds.X0, Y0: tc.Bounds.Y0, X1: tc.Bounds.X1, Y1: tc.Bounds.Y1}
+	if tc.Style.Reversible {
+		dwt.Forward53(buf.i, r, tc.Style.Levels)
+	} else {
+		dwt.Forward97(buf.f, r, tc.Style.Levels)
+	}
+}
+
+// fitTile sets the quantization of every component of the tile so that
+// each sub-band has the magnitude bit-planes its coefficients need, and
+// derives the region of interest shifts from the resulting numbers of
+// planes.  Parameters which differ from the main header go into the
+// tile-part header tp.  bufs holds the transformed coefficients of the
+// tile; for the irreversible path the planes are those of the quantised
+// coefficients.
+func (e *encoder) fitTile(tp *codestream.TilePart, tile *t2.Tile, bufs []sampleBuffer) error {
+	qs := make([]*codestream.Quantization, len(tile.Comps))
+	differ := false
+	for c, tc := range tile.Comps {
+		mags := bandMagnitudes(tc, bufs[c])
+		q := tc.Quant
+		q.Exponents = append([]int(nil), q.Exponents...)
+		fitQuantization(&q, mags, depthTruncation(tc.Depth))
+		qs[c] = &q
+		differ = differ || !quantEqual(&q, &tc.Quant)
+	}
+	tp.QCD, tp.QCC = nil, nil
+	if differ {
+		tp.QCD, tp.QCC = splitQuantization(qs)
+	}
+
+	tp.RGN = nil
+	if e.p.ROI != nil {
+		for c, q := range qs {
+			// the shift must exceed the magnitude bits of any background
+			// coefficient; the number of planes of the deepest band is a
+			// safe choice
+			shift := q.GuardBits - 1
+			for _, eps := range q.Exponents {
+				shift = max(shift, q.GuardBits+eps-1)
+			}
+			if 2*shift > t1.MaxPlanes {
+				return errors.New("jpx: region of interest not possible at this bit depth")
+			}
+			tp.RGN = append(tp.RGN, codestream.RGN{Component: c, Shift: shift})
+		}
+	}
+	return nil
+}
+
+var errTooManyPlanes = errors.New("jpx: coefficients need more bit-planes than a codestream can signal")
+
+// bandMagnitudes returns, per quantization entry, the bitwise or of the
+// magnitudes of the coefficients of tile-component tc to be coded, whose
+// bit length is the number of magnitude bit-planes the band needs.  For
+// the irreversible path these are the quantised coefficients.
+func bandMagnitudes(tc *t2.TileComp, buf sampleBuffer) []uint32 {
+	mags := make([]uint32, 3*tc.Style.Levels+1)
+	stride := tc.Bounds.Dx()
+	for _, res := range tc.Res {
+		for _, band := range res.Bands {
+			bx, by := bandOffset(res, band)
+			w, h := band.Bounds.Dx(), band.Bounds.Dy()
+			var acc uint32
+			if tc.Style.Reversible {
+				for y := range h {
+					for _, v := range buf.i[(by+y)*stride+bx:][:w] {
+						acc |= magnitude(v)
+					}
+				}
+			} else {
+				inv := quantScale(tc, band)
+				for y := range h {
+					for _, v := range buf.f[(by+y)*stride+bx:][:w] {
+						acc |= magnitude(quantise(v, inv))
+					}
+				}
+			}
+			mags[quantIndex(res.Level, band.Orient)] |= acc
+		}
+	}
+	return mags
+}
+
+// quantIndex returns the index of the quantization entry of the band
+// with orientation o at resolution level r: LL first, then the three
+// bands of each resolution level in order HL, LH, HH.
+func quantIndex(r int, o t1.Band) int {
+	if r == 0 {
+		return 0
+	}
+	return 3*(r-1) + 1 + int(o-t1.BandHL)
+}
+
+func magnitude(v int32) uint32 {
+	if v < 0 {
+		return uint32(-v)
+	}
+	return uint32(v)
+}
+
+// quantScale returns the factor which maps the irreversible coefficients
+// of band, at the scale of the plane values, to multiples of the
+// quantization step at the scale of the full samples.
+func quantScale(tc *t2.TileComp, band *t2.Band) float32 {
+	delta := math.Ldexp(quantStep(tc, band), -depthTruncation(tc.Depth))
+	return float32(1 / delta)
+}
+
+// quantise returns the quantization index of the coefficient v for the
+// scale inv returned by quantScale.
+func quantise(v, inv float32) int32 {
+	return int32(math.Trunc(float64(v * inv)))
 }
 
 // levelOf returns the decomposition level (1 = finest) of resolution res;

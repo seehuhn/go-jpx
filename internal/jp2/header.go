@@ -82,7 +82,16 @@ type ColorSpec struct {
 type Palette struct {
 	Entries int
 	Depths  []BitDepth // one per column
-	Values  [][]int32  // Values[entry][column], sign-extended if signed
+	// Values[entry][column], sign-extended if signed and divided by
+	// 2^PaletteTruncation(depth), rounded towards negative infinity;
+	// the writer multiplies them by 2^PaletteTruncation(depth)
+	Values [][]int32
+}
+
+// PaletteTruncation returns the number of low-order bits dropped from
+// palette values of the given depth, so that they fit 31 bits.
+func PaletteTruncation(depth int) int {
+	return max(0, depth-31)
 }
 
 // ComponentMapping is one entry of the component mapping box.
@@ -172,6 +181,9 @@ func (h *Header) parseJp2h(data []byte, charge func(int) error) error {
 					return err
 				}
 				var depths []BitDepth
+				if len(b.Data) > 0 {
+					depths = make([]BitDepth, 0, len(b.Data))
+				}
 				for _, c := range b.Data {
 					d, ok := decodeBitDepth(c)
 					if !ok || d.Depth == 0 {
@@ -210,6 +222,9 @@ func (h *Header) parseJp2h(data []byte, charge func(int) error) error {
 				if err := charge(len(b.Data)); err != nil {
 					return err
 				}
+				if len(b.Data) > 0 {
+					h.ComponentMap = make([]ComponentMapping, 0, len(b.Data)/4)
+				}
 				for p := b.Data; len(p) > 0; p = p[4:] {
 					h.ComponentMap = append(h.ComponentMap, ComponentMapping{
 						Component:     binary.BigEndian.Uint16(p),
@@ -227,6 +242,9 @@ func (h *Header) parseJp2h(data []byte, charge func(int) error) error {
 				}
 				if err := charge(6 * n); err != nil {
 					return err
+				}
+				if n > 0 {
+					h.Channels = make([]ChannelDef, 0, n)
 				}
 				for range n {
 					h.Channels = append(h.Channels, ChannelDef{
@@ -272,6 +290,8 @@ func parseColr(data []byte) (ColorSpec, error) {
 	cs := ColorSpec{Method: data[0], Precedence: int8(data[1]), Approx: data[2]}
 	rest := data[3:]
 	switch cs.Method {
+	case 0: // reserved
+		return cs, errMalformed
 	case 1:
 		if len(rest) < 4 {
 			return cs, errMalformed
@@ -304,10 +324,6 @@ func parsePclr(data []byte, charge func(int) error) (*Palette, error) {
 		if !ok || d.Depth < 1 {
 			return nil, errMalformed
 		}
-		if d.Depth > 31 {
-			// not representable in int32 samples
-			return nil, errMalformed
-		}
 		if err := charge(16); err != nil {
 			return nil, err
 		}
@@ -324,16 +340,16 @@ func parsePclr(data []byte, charge func(int) error) (*Palette, error) {
 	for range ne {
 		row := make([]int32, npc)
 		for j, d := range pal.Depths {
-			var v uint32
+			var v uint64
 			for range (d.Depth + 7) / 8 {
-				v = v<<8 | uint32(p[0])
+				v = v<<8 | uint64(p[0])
 				p = p[1:]
 			}
 			x := int64(v) & (1<<d.Depth - 1)
 			if d.Signed && x >= 1<<(d.Depth-1) {
 				x -= 1 << d.Depth
 			}
-			row[j] = int32(x)
+			row[j] = int32(x >> PaletteTruncation(d.Depth))
 		}
 		pal.Values = append(pal.Values, row)
 	}
@@ -429,7 +445,7 @@ func (pal *Palette) encode() ([]byte, error) {
 	p := binary.BigEndian.AppendUint16(nil, uint16(pal.Entries))
 	p = append(p, byte(npc))
 	for _, d := range pal.Depths {
-		if d.Depth < 1 || d.Depth > 31 {
+		if d.Depth < 1 || d.Depth > 38 {
 			return nil, errors.New("jp2: unsupported palette depth")
 		}
 		b, _ := d.encode()
@@ -440,17 +456,20 @@ func (pal *Palette) encode() ([]byte, error) {
 			return nil, errors.New("jp2: invalid palette dimensions")
 		}
 		for j, v := range row {
+			// values of deep columns are held divided by 2^t
 			d := pal.Depths[j]
+			t := PaletteTruncation(d.Depth)
 			lo, hi := int64(0), int64(1)<<d.Depth-1
 			if d.Signed {
 				lo, hi = -(int64(1) << (d.Depth - 1)), int64(1)<<(d.Depth-1)-1
 			}
-			if int64(v) < lo || int64(v) > hi {
+			x := int64(v) << t
+			if x < lo || x > hi {
 				return nil, errors.New("jp2: palette value out of range for its depth")
 			}
-			nb := (pal.Depths[j].Depth + 7) / 8
+			nb := (d.Depth + 7) / 8
 			for k := nb - 1; k >= 0; k-- {
-				p = append(p, byte(uint32(v)>>(8*k)))
+				p = append(p, byte(uint64(x)>>(8*k)))
 			}
 		}
 	}

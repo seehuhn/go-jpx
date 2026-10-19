@@ -16,17 +16,19 @@ func TestReadHeader(t *testing.T) {
 		{Depth: 8, XRsiz: 1, YRsiz: 1},
 		{Depth: 16, Signed: true, XRsiz: 2, YRsiz: 2},
 	}
-	data := minimalCodestream(minimalParams{width: 33, height: 20, comps: comps, levels: 1, tileSize: 16})
+	data := minimalCodestream(minimalParams{width: 33, height: 20, xOff: 2, yOff: 1, comps: comps, levels: 1, tileSize: 16})
 	h, err := ReadHeader(bytes.NewReader(data), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := &Header{
-		Width:  33,
-		Height: 20,
+		XOffset: 2,
+		YOffset: 1,
+		Width:   31,
+		Height:  19,
 		Components: []Component{
-			{Depth: 8, DX: 1, DY: 1, Width: 33, Height: 20},
-			{Depth: 16, Signed: true, DX: 2, DY: 2, Width: 17, Height: 10},
+			{Depth: 8, DX: 1, DY: 1, Width: 31, Height: 19},
+			{Depth: 16, Signed: true, DX: 2, DY: 2, Width: 16, Height: 9},
 		},
 		Channels: []Channel{
 			{Component: 0, PaletteColumn: -1, Kind: ChannelColor, Assoc: 1},

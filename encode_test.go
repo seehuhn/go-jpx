@@ -5,13 +5,18 @@ package jpx
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"reflect"
+	"strconv"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"seehuhn.de/go/jpx/internal/codestream"
+	"seehuhn.de/go/jpx/internal/t2"
 	"seehuhn.de/go/membudget"
 )
 
@@ -19,15 +24,20 @@ import (
 // noise, which exercises all sub-bands.  Sample values span the full
 // range of each component.
 func testImage(w, h int, comps []Component, seed uint64) *Image {
+	return testImageAt(0, 0, w, h, comps, seed)
+}
+
+// testImageAt is like testImage, for an image area starting at (x0, y0)
+// on the reference grid.
+func testImageAt(x0, y0, w, h int, comps []Component, seed uint64) *Image {
 	rng := rand.New(rand.NewPCG(seed, 99))
-	img := &Image{Header: Header{Width: w, Height: h, Components: comps}}
+	img := &Image{XOffset: x0, YOffset: y0, Width: w, Height: h, Components: comps}
 	for ci, c := range comps {
-		pw, ph := ceilDiv(w, c.DX), ceilDiv(h, c.DY)
+		pw := ceilDiv(x0+w, c.DX) - ceilDiv(x0, c.DX)
+		ph := ceilDiv(y0+h, c.DY) - ceilDiv(y0, c.DY)
 		img.Components[ci].Width, img.Components[ci].Height = pw, ph
-		lo, hi := 0.0, float64(uint64(1)<<uint(c.Depth)-1)
-		if c.Signed {
-			lo, hi = -float64(uint64(1)<<uint(c.Depth-1)), float64(uint64(1)<<uint(c.Depth-1)-1)
-		}
+		l, u := sampleRange(c)
+		lo, hi := float64(l), float64(u)
 		pix := make([]int32, pw*ph)
 		for y := range ph {
 			for x := range pw {
@@ -353,14 +363,19 @@ func TestPaletteMetadata(t *testing.T) {
 }
 
 func TestEncodeErrors(t *testing.T) {
-	img := testImage(8, 8, gray(8), 9)
 	bad := []struct {
 		name string
 		mod  func(img *Image, p *EncodeParams)
 	}{
 		{"wrong plane size", func(img *Image, p *EncodeParams) { img.Planes[0].Width = 7 }},
 		{"missing plane", func(img *Image, p *EncodeParams) { img.Planes = nil }},
-		{"depth too large", func(img *Image, p *EncodeParams) { img.Components[0].Depth = 30 }},
+		{"depth too large", func(img *Image, p *EncodeParams) {
+			img.Components[0].Depth, img.Components[0].Truncation = MaxDepth+1, MaxDepth+1-MaxPrecision
+		}},
+		{"deep samples without truncation", func(img *Image, p *EncodeParams) { img.Components[0].Depth = 30 }},
+		{"inconsistent truncation", func(img *Image, p *EncodeParams) {
+			img.Components[0].Depth, img.Components[0].Truncation = 20, 3
+		}},
 		{"bad block size", func(img *Image, p *EncodeParams) { p.CodeBlockWidth = 100 }},
 		{"block too large", func(img *Image, p *EncodeParams) { p.CodeBlockWidth, p.CodeBlockHeight = 1024, 1024 }},
 		{"bad progression", func(img *Image, p *EncodeParams) { p.Progression = 7 }},
@@ -368,6 +383,19 @@ func TestEncodeErrors(t *testing.T) {
 		{"bad levels", func(img *Image, p *EncodeParams) { p.Levels = 40 }},
 		{"empty roi", func(img *Image, p *EncodeParams) { p.ROI = &Rectangle{3, 3, 3, 5} }},
 		{"reduced image", func(img *Image, p *EncodeParams) { img.Reduce = 1 }},
+		{"truncated samples", func(img *Image, p *EncodeParams) { img.Components[0].Truncation = 1 }},
+		{"truncated palette", func(img *Image, p *EncodeParams) {
+			img.Palette = &Palette{Entries: [][]int32{{0}}, Columns: []PaletteColumn{{Depth: 8, Truncation: 1}}}
+			img.Channels = []Channel{{Component: 0, PaletteColumn: 0}}
+		}},
+		{"deep palette without truncation", func(img *Image, p *EncodeParams) {
+			img.Palette = &Palette{Entries: [][]int32{{0}}, Columns: []PaletteColumn{{Depth: 38}}}
+			img.Channels = []Channel{{Component: 0, PaletteColumn: 0}}
+		}},
+		{"palette too deep", func(img *Image, p *EncodeParams) {
+			img.Palette = &Palette{Entries: [][]int32{{0}}, Columns: []PaletteColumn{{Depth: 39, Truncation: 8}}}
+			img.Channels = []Channel{{Component: 0, PaletteColumn: 0}}
+		}},
 		{"sample out of range", func(img *Image, p *EncodeParams) { img.Planes[0].Pix[3] = 256 }},
 		{"negative sample", func(img *Image, p *EncodeParams) { img.Planes[0].Pix[3] = -1 }},
 		{"quality NaN", func(img *Image, p *EncodeParams) { p.Lossy, p.Quality = true, math.NaN() }},
@@ -398,7 +426,77 @@ func TestEncodeErrors(t *testing.T) {
 	if err := Encode(&bytes.Buffer{}, nil, nil); err == nil {
 		t.Error("nil image: no error")
 	}
-	_ = img
+}
+
+func TestRoundTripOffset(t *testing.T) {
+	mixed := []Component{{Depth: 8, DX: 1, DY: 1}, {Depth: 12, Signed: true, DX: 2, DY: 3}, {Depth: 8, DX: 3, DY: 2}}
+	cases := []struct {
+		name   string
+		x0, y0 int
+		w, h   int
+		comps  []Component
+		p      EncodeParams
+	}{
+		{"even", 4, 6, 30, 20, mixed, EncodeParams{}},
+		{"odd", 3, 5, 31, 21, mixed, EncodeParams{}},
+		{"odd one sample", 1, 1, 2, 2, []Component{{Depth: 8, DX: 2, DY: 2}}, EncodeParams{}},
+		{"component without samples", 1, 0, 1, 2, []Component{{Depth: 8, DX: 1, DY: 1}, {Depth: 8, DX: 2, DY: 1}}, EncodeParams{}},
+		{"tiles", 7, 9, 50, 40, mixed, EncodeParams{TileWidth: 16, TileHeight: 16}},
+		{"lossy", 5, 2, 40, 30, rgb(8), EncodeParams{Lossy: true, Quality: 100}},
+		{"wrapper", 1, 0, 20, 20, rgb(8), EncodeParams{Wrapper: true}},
+		{"roi", 3, 3, 40, 40, gray(8), EncodeParams{ROI: &Rectangle{5, 5, 20, 20}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			img := testImageAt(c.x0, c.y0, c.w, c.h, c.comps, 1)
+			got := roundTrip(t, img, &c.p)
+			if got.XOffset != c.x0 || got.YOffset != c.y0 || got.Width != c.w || got.Height != c.h {
+				t.Errorf("geometry: got offset (%d,%d) size %dx%d, want (%d,%d) %dx%d",
+					got.XOffset, got.YOffset, got.Width, got.Height, c.x0, c.y0, c.w, c.h)
+			}
+			if diff := cmp.Diff(img.Components, got.Components); diff != "" {
+				t.Errorf("components (-want +got):\n%s", diff)
+			}
+			if c.p.Lossy {
+				for i := range img.Planes {
+					if q := psnr(img.Planes[i], got.Planes[i], img.Components[i].Depth); q < 40 {
+						t.Errorf("plane %d: PSNR %.1f", i, q)
+					}
+				}
+				return
+			}
+			if diff := cmp.Diff(img.Planes, got.Planes); diff != "" {
+				t.Errorf("round trip failed (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestEncodeInvalidOffset(t *testing.T) {
+	type offsetCase struct {
+		name   string
+		x0, y0 int
+		w, h   int
+	}
+	cases := []offsetCase{
+		{"negative x", -1, 0, 4, 4},
+		{"negative y", 0, -1, 4, 4},
+	}
+	if strconv.IntSize == 64 {
+		// offset plus size beyond 32 bits is not representable on 32-bit int
+		limit := uint64(math.MaxUint32)
+		cases = append(cases,
+			offsetCase{"x overflow", int(limit - 3), 0, 4, 4},
+			offsetCase{"y overflow", 0, int(limit - 2), 4, 4},
+		)
+	}
+	for _, c := range cases {
+		img := testImage(c.w, c.h, gray(8), 1)
+		img.XOffset, img.YOffset = c.x0, c.y0
+		if err := Encode(&bytes.Buffer{}, img, nil); err == nil {
+			t.Errorf("%s: no error", c.name)
+		}
+	}
 }
 
 // Many levels or layers must not cost time or memory beyond the budget.
@@ -497,14 +595,21 @@ func FuzzRoundTrip(f *testing.F) {
 		if err != nil {
 			return
 		}
-		// re-encode losslessly and decode again; the two decodes must agree
+		// every decoded image is re-encoded losslessly, and the two
+		// decodes must agree
 		var buf bytes.Buffer
-		if err := Encode(&buf, img, &EncodeParams{}); err != nil {
-			return
+		if err := Encode(&buf, img, &EncodeParams{Wrapper: img.Wrapped}); err != nil {
+			t.Fatalf("re-encoding the decoded image: %v", err)
 		}
 		again, err := Decode(bytes.NewReader(buf.Bytes()), &Options{Budget: newTestBudget(64 << 20)})
 		if err != nil {
 			t.Fatalf("decoding the re-encoded image: %v", err)
+		}
+		if diff := cmp.Diff(img.Components, again.Components); diff != "" {
+			t.Fatalf("re-encoded components differ (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(img.Palette, again.Palette); diff != "" {
+			t.Fatalf("re-encoded palette differs (-want +got):\n%s", diff)
 		}
 		if diff := cmp.Diff(img.Planes, again.Planes); diff != "" {
 			t.Fatalf("re-encoded image differs (-want +got):\n%s", diff)
@@ -552,11 +657,9 @@ func BenchmarkDecodeLossy(b *testing.B) {
 
 func ExampleEncode() {
 	img := &Image{
-		Header: Header{
-			Width: 4, Height: 2,
-			Components: []Component{{Depth: 8, DX: 1, DY: 1, Width: 4, Height: 2}},
-		},
-		Planes: []Plane{{Width: 4, Height: 2, Pix: []int32{0, 64, 128, 255, 255, 128, 64, 0}}},
+		Width: 4, Height: 2,
+		Components: []Component{{Depth: 8, DX: 1, DY: 1, Width: 4, Height: 2}},
+		Planes:     []Plane{{Width: 4, Height: 2, Pix: []int32{0, 64, 128, 255, 255, 128, 64, 0}}},
 	}
 	var buf bytes.Buffer
 	if err := Encode(&buf, img, &EncodeParams{}); err != nil {
@@ -624,6 +727,378 @@ func TestDecodeWorkers(t *testing.T) {
 		// truncated input decodes to a partial image with any number of workers
 		if _, err := Decode(bytes.NewReader(data[:len(data)*2/3]), &Options{Workers: 3}); err != nil {
 			t.Errorf("truncated input with workers: %v", err)
+		}
+	}
+}
+
+// writeBack encodes img with p, decodes the result and checks that it
+// equals img.
+func writeBack(t *testing.T, img *Image, p *EncodeParams) {
+	t.Helper()
+	got := roundTrip(t, img, p)
+	if diff := cmp.Diff(img, got); diff != "" {
+		t.Errorf("write-back changed the image (-want +got):\n%s", diff)
+	}
+}
+
+// patchMainHeader returns a copy of the codestream or JP2 file with
+// every component of the codestream given the depth and the guard bits
+// of every quantisation marker segment raised by raise, or to the
+// largest value the field holds.  For a reversible codestream this
+// places the coded coefficients that many planes higher.
+func patchMainHeader(t testing.TB, data []byte, depth, raise int) []byte {
+	t.Helper()
+	data = append([]byte(nil), data...)
+	// the codestream starts with SOC and SIZ, also inside a JP2 file
+	pos := bytes.Index(data, []byte{0xFF, 0x4F, 0xFF, 0x51}) + 2
+	for {
+		marker := binary.BigEndian.Uint16(data[pos:])
+		if marker == 0xFF90 {
+			return data
+		}
+		n := int(binary.BigEndian.Uint16(data[pos+2:]))
+		switch marker {
+		case 0xFF51: // SIZ
+			nc := int(binary.BigEndian.Uint16(data[pos+38:]))
+			for c := range nc {
+				i := pos + 40 + 3*c
+				data[i] = data[i]&0x80 | byte(depth-1)
+			}
+		case 0xFF5C: // QCD
+			raiseGuardBits(&data[pos+4], raise)
+		case 0xFF5D: // QCC, fewer than 257 components
+			raiseGuardBits(&data[pos+5], raise)
+		}
+		pos += 2 + n
+	}
+}
+
+// raiseGuardBits raises the guard bits in the quantization style byte s
+// by raise, at most to 7.
+func raiseGuardBits(s *byte, raise int) {
+	g := min(int(*s>>5)+raise, 7)
+	*s = *s&0x1F | byte(g<<5)
+}
+
+// truncatedImage returns an image with components of the given depth
+// and the truncation of decoded images, with planes spanning the full
+// range of their values.
+func truncatedImage(w, h, n, depth int, signed bool, seed uint64) *Image {
+	comps := make([]Component, n)
+	for i := range comps {
+		comps[i] = Component{Depth: depth, Signed: signed, Truncation: max(0, depth-MaxPrecision), DX: 1, DY: 1}
+	}
+	img := testImage(w, h, comps, seed)
+	// extreme values next to each other give the largest coefficients
+	for c := range img.Planes {
+		lo, hi := sampleRange(comps[c])
+		pix := img.Planes[c].Pix
+		for i := range min(len(pix), 2*w) {
+			if (i+i/w+c)%2 == 0 {
+				pix[i] = lo
+			} else {
+				pix[i] = hi
+			}
+		}
+	}
+	return img
+}
+
+// Every image decoded from a file is written back exactly, for all
+// accepted depths.  The first file is written by the encoder, or built
+// with deep samples whose lowest bits are not zero.
+func TestRoundTripDeep(t *testing.T) {
+	depths := []int{1, 8, 16, 24, 25, 28, 31, 32, 33, MaxDepth}
+	configs := []struct {
+		name string
+		n    int
+		p    EncodeParams
+	}{
+		{"grey", 1, EncodeParams{Wrapper: true}},
+		{"rgb", 3, EncodeParams{Wrapper: true, Levels: 3}},
+		{"grey tiled", 1, EncodeParams{TileWidth: 16, TileHeight: 8, Levels: 2}},
+		{"rgb tiled", 3, EncodeParams{TileWidth: 8, TileHeight: 16, Levels: 6, CodeBlockWidth: 8, CodeBlockHeight: 4}},
+	}
+	decode := func(t *testing.T, data []byte) *Image {
+		t.Helper()
+		img, err := Decode(bytes.NewReader(data), &Options{Budget: newTestBudget(64 << 20)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return img
+	}
+	for _, depth := range depths {
+		for _, signed := range []bool{false, true} {
+			for _, c := range configs {
+				t.Run(fmt.Sprintf("%s %d signed=%t", c.name, depth, signed), func(t *testing.T) {
+					img := truncatedImage(40, 36, c.n, depth, signed, uint64(depth))
+					var buf bytes.Buffer
+					if err := Encode(&buf, img, &c.p); err != nil {
+						t.Fatal(err)
+					}
+					first := decode(t, buf.Bytes())
+					if diff := cmp.Diff(img.Components, first.Components); diff != "" {
+						t.Errorf("wrong components (-want +got):\n%s", diff)
+					}
+					if diff := cmp.Diff(img.Planes, first.Planes); diff != "" {
+						t.Errorf("wrong planes (-want +got):\n%s", diff)
+					}
+					writeBack(t, first, &c.p)
+
+					// The same coefficients in a deeper codestream: the
+					// samples have non-zero bits below the held ones.
+					if depth <= 24 {
+						return
+					}
+					trunc := depth - MaxPrecision
+					raise := min(trunc-1, 5)
+					if raise == 0 {
+						return // no room below the held bits, see the synthetic case
+					}
+					deep := decode(t, patchMainHeader(t, buf.Bytes(), depth, raise))
+					writeBack(t, deep, &c.p)
+				})
+			}
+			if depth <= 24 {
+				continue
+			}
+			t.Run(fmt.Sprintf("synthetic %d signed=%t", depth, signed), func(t *testing.T) {
+				data, _ := deepImage(t, depth, signed, true)
+				writeBack(t, decode(t, data), &EncodeParams{Levels: NoLevels})
+			})
+		}
+	}
+}
+
+// The component transform is applied to matching components, unless
+// the bit-plane it adds would leave a sub-band with more planes than a
+// codestream can signal; the image is then coded without it.
+func TestMCTFallback(t *testing.T) {
+	// usesMCT reports whether the first tile is coded with the component
+	// transform, after checking the round trip
+	usesMCT := func(t *testing.T, img *Image) bool {
+		t.Helper()
+		var buf bytes.Buffer
+		if err := Encode(&buf, img, &EncodeParams{Levels: 2}); err != nil {
+			t.Fatal(err)
+		}
+		cr := codestream.NewReader(buf.Bytes(), nil)
+		m, err := cr.ReadMainHeader()
+		if err != nil {
+			t.Fatal(err)
+		}
+		tp, err := cr.NextTilePart()
+		if err != nil {
+			t.Fatal(err)
+		}
+		tile, err := t2.NewTile(m, []*codestream.TilePart{tp}, 0, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := roundTrip(t, img, &EncodeParams{Levels: 2})
+		if diff := cmp.Diff(img.Planes, got.Planes); diff != "" {
+			t.Errorf("round trip failed (-want +got):\n%s", diff)
+		}
+		return tile.MCT
+	}
+	if !usesMCT(t, testImage(48, 40, rgb(8), 3)) {
+		t.Error("component transform not applied to an 8-bit image")
+	}
+	if !usesMCT(t, truncatedImage(48, 40, 3, 30, false, 3)) {
+		t.Error("component transform not applied to a 30-bit image")
+	}
+	pick := func(x, y, c int) bool { return (x+y)%2 == 0 }
+	if usesMCT(t, extremeImage(48, 40, 3, MaxDepth, false, pick)) {
+		t.Errorf("component transform applied to a %d-bit image of extreme values", MaxDepth)
+	}
+}
+
+// A palette column of the largest depth is written back exactly, also
+// when its values have non-zero bits below the held ones.
+func TestRoundTripDeepPalette(t *testing.T) {
+	img := testImage(8, 8, gray(4), 3)
+	img.Palette = &Palette{Columns: []PaletteColumn{{Depth: 38, Signed: true, Truncation: 7}, {Depth: 32, Truncation: 1}, {Depth: 8}}}
+	for i := range 16 {
+		img.Palette.Entries = append(img.Palette.Entries, []int32{int32(-1<<30 + i*0x7654321), int32(i * 0x7000001), int32(i)})
+	}
+	img.Palette.Entries[15][0] = 1<<30 - 1
+	img.Channels = []Channel{
+		{Component: 0, PaletteColumn: 0, Kind: ChannelColor, Assoc: 1},
+		{Component: 0, PaletteColumn: 1, Kind: ChannelColor, Assoc: 2},
+		{Component: 0, PaletteColumn: 2, Kind: ChannelColor, Assoc: 3},
+	}
+	p := &EncodeParams{Wrapper: true}
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, p); err != nil {
+		t.Fatal(err)
+	}
+	first, err := Decode(bytes.NewReader(buf.Bytes()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff(img.Palette, first.Palette); diff != "" {
+		t.Errorf("wrong palette (-want +got):\n%s", diff)
+	}
+	writeBack(t, first, p)
+
+	// set low-order bits of the deep columns in the file
+	data := append([]byte(nil), buf.Bytes()...)
+	i := bytes.Index(data, []byte("pclr")) + 4
+	entries := i + 3 + 3
+	for e := range 16 {
+		row := data[entries+e*(5+4+1):]
+		row[4] |= 0x5A
+		row[5+3] |= 0x01
+	}
+	deep, err := Decode(bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff(img.Palette, deep.Palette); diff != "" {
+		t.Errorf("low-order bits changed the held values (-want +got):\n%s", diff)
+	}
+	writeBack(t, deep, p)
+}
+
+// Components deeper than MaxDepth bits are rejected on reading.
+func TestDecodeTooDeep(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Encode(&buf, testImage(8, 8, gray(8), 1), nil); err != nil {
+		t.Fatal(err)
+	}
+	ok := patchMainHeader(t, buf.Bytes(), MaxDepth, 0)
+	if _, err := Decode(bytes.NewReader(ok), nil); err != nil {
+		t.Errorf("depth %d rejected: %v", MaxDepth, err)
+	}
+	bad := patchMainHeader(t, buf.Bytes(), MaxDepth+1, 0)
+	if _, err := Decode(bytes.NewReader(bad), nil); err == nil {
+		t.Errorf("depth %d accepted by Decode", MaxDepth+1)
+	}
+	h, err := ReadHeader(bytes.NewReader(bad), nil)
+	if err != nil {
+		t.Fatalf("depth %d rejected by ReadHeader: %v", MaxDepth+1, err)
+	}
+	if h.Components[0].Depth != MaxDepth+1 {
+		t.Errorf("ReadHeader reports depth %d, want %d", h.Components[0].Depth, MaxDepth+1)
+	}
+}
+
+// Lossy encoding of truncated components quantises at the scale of the
+// full samples, with the quality of the same image at 24 bits.
+func TestRoundTripDeepLossy(t *testing.T) {
+	var ref []float64
+	for _, depth := range []int{24, 30, MaxDepth} {
+		img := truncatedImage(48, 40, 3, depth, false, 5)
+		got := roundTrip(t, img, &EncodeParams{Lossy: true, Quality: 90})
+		if diff := cmp.Diff(img.Components, got.Components); diff != "" {
+			t.Errorf("depth %d: wrong components (-want +got):\n%s", depth, diff)
+		}
+		for i := range img.Planes {
+			p := psnr(img.Planes[i], got.Planes[i], MaxPrecision)
+			if depth == 24 {
+				ref = append(ref, p)
+			}
+			if p < 35 || math.Abs(p-ref[i]) > 0.5 {
+				t.Errorf("depth %d: plane %d has PSNR %.1f, want about %.1f", depth, i, p, ref[i])
+			}
+		}
+	}
+}
+
+// extremeImage returns an image of n components whose samples take only
+// the smallest and the largest value of their range, the largest where
+// pick reports true.
+func extremeImage(w, h, n, depth int, signed bool, pick func(x, y, c int) bool) *Image {
+	comps := make([]Component, n)
+	for i := range comps {
+		comps[i] = Component{Depth: depth, Signed: signed, Truncation: depthTruncation(depth), DX: 1, DY: 1, Width: w, Height: h}
+	}
+	img := &Image{Width: w, Height: h, Components: comps, Channels: defaultChannels(n)}
+	for c := range comps {
+		lo, hi := sampleRange(comps[c])
+		pix := make([]int32, w*h)
+		for y := range h {
+			for x := range w {
+				pix[y*w+x] = lo
+				if pick(x, y, c) {
+					pix[y*w+x] = hi
+				}
+			}
+		}
+		img.Planes = append(img.Planes, Plane{Width: w, Height: h, Pix: pix})
+	}
+	return img
+}
+
+// extremePatterns returns sample patterns which produce large wavelet
+// coefficients: checkerboards, stripes of several periods and noise,
+// each also with the second component inverted, which maximises the
+// chroma of the component transform.
+func extremePatterns(seed uint64) map[string]func(x, y, c int) bool {
+	base := map[string]func(x, y int) bool{
+		"checker": func(x, y int) bool { return (x+y)%2 == 0 },
+	}
+	for _, period := range []int{1, 2, 3, 8} {
+		base[fmt.Sprintf("columns %d", period)] = func(x, y int) bool { return (x/period)%2 == 0 }
+		base[fmt.Sprintf("rows %d", period)] = func(x, y int) bool { return (y/period)%2 == 0 }
+	}
+	rng := rand.New(rand.NewPCG(seed, 7))
+	noise := make([]bool, 1<<16)
+	for i := range noise {
+		noise[i] = rng.IntN(2) == 0
+	}
+	base["noise"] = func(x, y int) bool { return noise[(y*251+x)%len(noise)] }
+
+	patterns := make(map[string]func(x, y, c int) bool)
+	for name, f := range base {
+		patterns[name] = func(x, y, c int) bool { return f(x, y) }
+		patterns[name+" inverted"] = func(x, y, c int) bool { return f(x, y) != (c == 1) }
+	}
+	return patterns
+}
+
+// Images of extreme values, which need the most magnitude bit-planes
+// relative to their depth, are encoded losslessly for every number of
+// decomposition levels, with and without the component transform.
+func TestRoundTripExtreme(t *testing.T) {
+	configs := []struct {
+		depth  int
+		sizes  [][2]int
+		levels []int
+	}{
+		{1, [][2]int{{48, 138}, {17, 33}}, []int{1, 2, 3, 4, 5}},
+		{2, [][2]int{{48, 138}, {17, 33}}, []int{1, 2, 3, 4, 5}},
+		{MaxDepth, [][2]int{{48, 138}}, []int{2, 5}},
+	}
+	for _, cfg := range configs {
+		depth := cfg.depth
+		for _, signed := range []bool{false, true} {
+			for name, pick := range extremePatterns(uint64(depth)) {
+				for _, n := range []int{1, 3} {
+					for _, sz := range cfg.sizes {
+						img := extremeImage(sz[0], sz[1], n, depth, signed, pick)
+						for _, levels := range cfg.levels {
+							var buf bytes.Buffer
+							if err := Encode(&buf, img, &EncodeParams{Levels: levels}); err != nil {
+								t.Errorf("depth %d signed=%t %s n=%d %dx%d levels=%d: %v",
+									depth, signed, name, n, sz[0], sz[1], levels, err)
+								continue
+							}
+							got, err := Decode(bytes.NewReader(buf.Bytes()), nil)
+							if err != nil {
+								t.Fatal(err)
+							}
+							if reflect.DeepEqual(img.Planes, got.Planes) {
+								continue
+							}
+							if diff := cmp.Diff(img.Planes, got.Planes); diff != "" {
+								t.Errorf("depth %d signed=%t %s n=%d %dx%d levels=%d: round trip failed (-want +got):\n%s",
+									depth, signed, name, n, sz[0], sz[1], levels, diff)
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 }

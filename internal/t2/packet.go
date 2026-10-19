@@ -6,6 +6,7 @@ package t2
 import (
 	"errors"
 	"math/bits"
+	"unsafe"
 
 	"seehuhn.de/go/jpx/internal/t1"
 )
@@ -183,12 +184,9 @@ func (t *Tile) readBandHeader(br *BitReader, pb *PrecinctBand, layer int, tc *Ti
 				if err != nil {
 					return err
 				}
-				if len(*pieces) == cap(*pieces) {
-					if err := charge.charge(32 * max(cap(*pieces), 16)); err != nil {
-						return err
-					}
+				if err := appendCharged(pieces, Piece{cb: cb, length: int(length), passes: n, closes: term}, charge); err != nil {
+					return err
 				}
-				*pieces = append(*pieces, Piece{cb: cb, length: int(length), passes: n, closes: term})
 				start = k + 1
 			}
 			cb.Passes += npasses
@@ -236,24 +234,31 @@ func readPassCount(br *BitReader) (int, error) {
 func (cb *CodeBlock) addPiece(data []byte, passes int, closes bool, charge Charge) error {
 	n := len(cb.Segments)
 	if n == 0 || cb.Segments[n-1].Closed {
-		// slices grow by doubling; charge the growth, not the element
-		if n == cap(cb.Segments) {
-			if err := charge.charge(64 * max(n, 1)); err != nil {
-				return err
-			}
+		if err := appendCharged(&cb.Segments, Segment{}, charge); err != nil {
+			return err
 		}
-		cb.Segments = append(cb.Segments, Segment{})
 		n++
 	}
 	seg := &cb.Segments[n-1]
-	if len(seg.Chunks) == cap(seg.Chunks) {
-		if err := charge.charge(24 * max(len(seg.Chunks), 1)); err != nil {
-			return err
-		}
+	if err := appendCharged(&seg.Chunks, data, charge); err != nil {
+		return err
 	}
-	seg.Chunks = append(seg.Chunks, data)
 	seg.Passes += passes
 	seg.Closed = closes
+	return nil
+}
+
+// appendCharged appends v to *s.  A full backing array is replaced by one
+// of twice the capacity, which is charged before it is allocated.
+func appendCharged[T any](s *[]T, v T, charge Charge) error {
+	if len(*s) == cap(*s) {
+		n := max(2*cap(*s), 4)
+		if err := charge.charge(n * int(unsafe.Sizeof(v))); err != nil {
+			return err
+		}
+		*s = append(make([]T, 0, n), *s...)
+	}
+	*s = append(*s, v)
 	return nil
 }
 

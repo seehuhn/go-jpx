@@ -9,7 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
+	"math/bits"
+	"slices"
 
 	"seehuhn.de/go/jpx/internal/codestream"
 	"seehuhn.de/go/jpx/internal/dwt"
@@ -60,7 +63,7 @@ type EncodeParams struct {
 	Levels int
 
 	// TileWidth and TileHeight set the tile size on the reference grid;
-	// zero means a single tile.
+	// zero means a single tile.  The tiles start at the image offset.
 	TileWidth, TileHeight int
 
 	// CodeBlockWidth and CodeBlockHeight are powers of two between 4 and
@@ -98,7 +101,9 @@ type EncodeParams struct {
 	ProgressionChanges []ProgressionChange
 
 	// NoMCT disables the component transform, which is otherwise applied
-	// whenever the first three components have identical sampling.
+	// whenever the first three components have identical sampling, depth
+	// and signedness, unless its coefficients would need more magnitude
+	// bit-planes than a codestream can signal.
 	NoMCT bool
 
 	// ROI optionally selects a rectangular region of interest on the
@@ -222,8 +227,9 @@ func validateImage(img *Image) error {
 		return errors.New("jpx: nil image")
 	}
 	h := &img.Header
-	if h.Width <= 0 || h.Height <= 0 || uint64(h.Width) > math.MaxUint32 || uint64(h.Height) > math.MaxUint32 {
-		return errors.New("jpx: invalid image size")
+	if h.Width <= 0 || h.Height <= 0 || h.XOffset < 0 || h.YOffset < 0 ||
+		uint64(h.XOffset)+uint64(h.Width) > math.MaxUint32 || uint64(h.YOffset)+uint64(h.Height) > math.MaxUint32 {
+		return errors.New("jpx: invalid image size or offset")
 	}
 	if len(h.Components) == 0 || len(h.Components) > 16384 {
 		return errors.New("jpx: invalid number of components")
@@ -235,21 +241,25 @@ func validateImage(img *Image) error {
 		return errors.New("jpx: cannot encode a reduced image")
 	}
 	for i, c := range h.Components {
-		if c.Depth < 1 || c.Depth > MaxEncodeDepth {
+		if c.Depth < 1 || c.Depth > MaxDepth {
 			return fmt.Errorf("jpx: component %d has unsupported depth %d", i, c.Depth)
+		}
+		if c.Truncation != depthTruncation(c.Depth) {
+			return fmt.Errorf("jpx: component %d has truncation %d, want %d", i, c.Truncation, depthTruncation(c.Depth))
 		}
 		if c.DX < 1 || c.DX > 255 || c.DY < 1 || c.DY > 255 {
 			return fmt.Errorf("jpx: component %d has invalid sub-sampling", i)
 		}
-		w, hh := ceilDiv(h.Width, c.DX), ceilDiv(h.Height, c.DY)
+		w := ceilDiv(h.XOffset+h.Width, c.DX) - ceilDiv(h.XOffset, c.DX)
+		hh := ceilDiv(h.YOffset+h.Height, c.DY) - ceilDiv(h.YOffset, c.DY)
 		pl := img.Planes[i]
-		if pl.Width != w || pl.Height != hh || hh > math.MaxInt/8/w || len(pl.Pix) != w*hh {
+		if pl.Width != w || pl.Height != hh || (w > 0 && hh > math.MaxInt/8/w) || len(pl.Pix) != w*hh {
 			return fmt.Errorf("jpx: plane %d has size %dx%d, want %dx%d", i, pl.Width, pl.Height, w, hh)
 		}
 		lo, hi := sampleRange(c)
 		for _, v := range pl.Pix {
 			if v < lo || v > hi {
-				return fmt.Errorf("jpx: sample %d of plane %d is outside the %d-bit range", v, i, c.Depth)
+				return fmt.Errorf("jpx: sample %d of plane %d is outside the range of its component", v, i)
 			}
 		}
 	}
@@ -273,6 +283,11 @@ func validateImage(img *Image) error {
 				return errors.New("jpx: palette entry with wrong number of columns")
 			}
 		}
+		for j, col := range h.Palette.Columns {
+			if col.Depth < 1 || col.Depth > 38 || col.Truncation != jp2.PaletteTruncation(col.Depth) {
+				return fmt.Errorf("jpx: palette column %d has invalid depth or truncation", j)
+			}
+		}
 	}
 	for i, cs := range h.ColorSpecs {
 		if cs.Method < 1 || cs.Method > 255 || cs.Precedence < -128 || cs.Precedence > 127 || cs.Approx < 0 || cs.Approx > 255 || cs.Enumerated < 0 || uint64(cs.Enumerated) > math.MaxUint32 {
@@ -282,30 +297,33 @@ func validateImage(img *Image) error {
 	return nil
 }
 
-// sampleRange returns the smallest and largest sample value of a
-// component.
+// sampleRange returns the smallest and largest plane value of a
+// component, that is the sample range divided by 2^Truncation.
 func sampleRange(c Component) (lo, hi int32) {
+	t := uint(max(c.Truncation, 0))
 	if c.Signed {
-		return -(1 << uint(c.Depth-1)), 1<<uint(c.Depth-1) - 1
+		return int32(-(int64(1) << uint(c.Depth-1)) >> t), int32((int64(1)<<uint(c.Depth-1) - 1) >> t)
 	}
-	return 0, 1<<uint(c.Depth) - 1
+	return 0, int32((int64(1)<<uint(c.Depth) - 1) >> t)
 }
 
-// MaxEncodeDepth is the largest sample precision the encoder accepts.
-// The limit keeps the number of coded bit-planes within the coder's range
-// with the usual guard bits.
-const MaxEncodeDepth = 24
-
 // buildMainHeader derives the codestream parameters from the image and
-// the encoding parameters.
+// the encoding parameters.  The quantization is the nominal one; the
+// guard bits are fitted to the coefficients of each tile by fitTile, and
+// the region of interest shifts follow from them.
 func (e *encoder) buildMainHeader() (*codestream.MainHeader, error) {
 	img, p := e.img, e.p
 	m := &codestream.MainHeader{}
+	// the tile grid starts at the image offset
 	m.SIZ = codestream.SIZ{
-		Xsiz:  uint32(img.Width),
-		Ysiz:  uint32(img.Height),
-		XTsiz: uint32(img.Width),
-		YTsiz: uint32(img.Height),
+		Xsiz:   uint32(img.XOffset + img.Width),
+		Ysiz:   uint32(img.YOffset + img.Height),
+		XOsiz:  uint32(img.XOffset),
+		YOsiz:  uint32(img.YOffset),
+		XTsiz:  uint32(img.Width),
+		YTsiz:  uint32(img.Height),
+		XTOsiz: uint32(img.XOffset),
+		YTOsiz: uint32(img.YOffset),
 	}
 	if p.TileWidth > 0 || p.TileHeight > 0 {
 		if p.TileWidth <= 0 || p.TileHeight <= 0 {
@@ -387,62 +405,61 @@ func (e *encoder) buildMainHeader() (*codestream.MainHeader, error) {
 	}
 
 	m.COD = &codestream.COD{
-		CodingStyle: codestream.CodingStyle{
-			EntropyBypass:       p.Bypass,
-			ResetContexts:       p.ResetContexts,
-			Terminate:           p.Terminate,
-			VerticallyCausal:    p.VerticallyCausal,
-			SegmentationSymbols: p.SegmentationSymbols,
-			Levels:              levels,
-			CodeBlockW:          xcb,
-			CodeBlockH:          ycb,
-			Reversible:          !p.Lossy,
-			PrecinctSizes:       precincts,
-		},
-		Progression: codestream.Progression(p.Progression),
-		Layers:      e.layers,
-		MCT:         e.useMCT(),
-		SOP:         p.SOP,
-		EPH:         p.EPH,
+		EntropyBypass:       p.Bypass,
+		ResetContexts:       p.ResetContexts,
+		Terminate:           p.Terminate,
+		VerticallyCausal:    p.VerticallyCausal,
+		SegmentationSymbols: p.SegmentationSymbols,
+		Levels:              levels,
+		CodeBlockW:          xcb,
+		CodeBlockH:          ycb,
+		Reversible:          !p.Lossy,
+		PrecinctSizes:       precincts,
+		Progression:         codestream.Progression(p.Progression),
+		Layers:              e.layers,
+		MCT:                 e.useMCT(),
+		SOP:                 p.SOP,
+		EPH:                 p.EPH,
 	}
 
-	// quantization: QCD for component 0, QCC where others differ
-	m.QCC = make(map[int]*codestream.Quantization)
-	for c, comp := range img.Components {
-		q := e.quantization(comp, c, levels, m.COD.MCT)
-		if c == 0 {
-			m.QCD = q
-		} else if !quantEqual(q, m.QCD) {
-			m.QCC[c] = q
-		}
+	if p.ROI != nil && (p.ROI.X0 >= p.ROI.X1 || p.ROI.Y0 >= p.ROI.Y1) {
+		return nil, errors.New("jpx: empty region of interest")
 	}
 
-	if p.ROI != nil {
-		if p.ROI.X0 >= p.ROI.X1 || p.ROI.Y0 >= p.ROI.Y1 {
-			return nil, errors.New("jpx: empty region of interest")
+	// The nominal quantization: QCD for component 0, QCC where others
+	// differ.  When the chroma bit of the component transform already
+	// exhausts the guard bits, the image is coded without it.
+	for {
+		qs := make([]*codestream.Quantization, len(img.Components))
+		ok := true
+		for c, comp := range img.Components {
+			qs[c] = e.quantization(comp, c, levels, m.COD.MCT)
+			ok = ok && qs[c].GuardBits <= maxGuardBits
 		}
-		for c := range img.Components {
-			// the shift must exceed the magnitude bits of any background
-			// coefficient; the number of planes of the deepest band is a
-			// safe choice
-			q := m.QCD
-			if qq, ok := m.QCC[c]; ok {
-				q = qq
-			}
-			shift := q.GuardBits - 1
-			for _, eps := range q.Exponents {
-				shift = max(shift, q.GuardBits+eps-1)
-			}
-			if 2*shift > t1.MaxPlanes {
-				return nil, errors.New("jpx: region of interest not possible at this bit depth")
-			}
-			m.RGN = append(m.RGN, codestream.RGN{Component: c, Shift: shift})
+		if ok {
+			m.QCD, m.QCC = splitQuantization(qs)
+			return m, nil
 		}
+		if !m.COD.MCT {
+			return nil, errTooManyPlanes
+		}
+		m.COD.MCT = false
 	}
-	return m, nil
 }
 
-// useMCT reports whether the component transform is applied.
+// splitQuantization returns the quantization of component 0 and, for the
+// other components, the entries which differ from it.
+func splitQuantization(qs []*codestream.Quantization) (*codestream.Quantization, map[int]*codestream.Quantization) {
+	qcc := make(map[int]*codestream.Quantization)
+	for c := 1; c < len(qs); c++ {
+		if !quantEqual(qs[c], qs[0]) {
+			qcc[c] = qs[c]
+		}
+	}
+	return qs[0], qcc
+}
+
+// useMCT reports whether the component transform can be applied.
 func (e *encoder) useMCT() bool {
 	if e.p.NoMCT || len(e.img.Components) < 3 {
 		return false
@@ -456,19 +473,61 @@ func (e *encoder) useMCT() bool {
 	return true
 }
 
-// quantization returns the quantization parameters for component c.
+// maxGuardBits and maxExponentField are the largest guard bit count and
+// quantization exponent a codestream can signal.
+const (
+	maxGuardBits     = 7
+	maxExponentField = 31
+)
+
+// fitQuantization raises the guard bits of q so that every sub-band has
+// the magnitude bit-planes its coefficients need; the exponents are kept.
+// mags holds the bitwise or of the coefficient magnitudes per
+// quantization entry.  On the reversible path these are at the scale of
+// the plane values, which lies trunc planes below the scale of the
+// samples that the exponents refer to.
+//
+// The nominal quantization reserves the band gains and the chroma bit
+// of the component transform, and the guard bits cover the excess of the
+// true sub-band gains over the nominal ones, so that the fitted guard
+// bits never exceed the nominal ones.  The codestream can therefore
+// always signal the planes, and the coder handles at least the planes
+// above the scale of the plane values.
+func fitQuantization(q *codestream.Quantization, mags []uint32, trunc int) {
+	if q.Style != codestream.QuantNone {
+		trunc = 0
+	}
+	g := q.GuardBits
+	for b, m := range mags {
+		g = max(g, bits.Len32(m)+trunc-q.Exponents[b]+1)
+	}
+	q.GuardBits = g
+}
+
+// quantization returns the quantization parameters of component c
+// before fitQuantization.
 func (e *encoder) quantization(comp Component, c, levels int, mct bool) *codestream.Quantization {
 	q := &codestream.Quantization{GuardBits: encoderGuardBits}
-	// the reversible component transform adds one bit to the chroma
-	// components
-	extra := 0
-	if !e.p.Lossy && mct && c > 0 && c < 3 {
-		extra = 1
-	}
 	if !e.p.Lossy {
+		// The exponents are the depth plus the band gain, plus the bit
+		// the reversible component transform adds to the chroma
+		// components, so that the bands have the planes of the
+		// coefficients at the scale of the full samples, also for
+		// truncated components.  Exponents beyond the field's limit are
+		// traded for guard bits.
+		extra := 0
+		if mct && c > 0 && c < 3 {
+			extra = 1
+		}
 		q.Style = codestream.QuantNone
+		top := comp.Depth + extra
+		if levels > 0 {
+			top += maxBandGain
+		}
+		raise := max(0, top-maxExponentField)
+		q.GuardBits += raise
 		for b := range 3*levels + 1 {
-			q.Exponents = append(q.Exponents, comp.Depth+bandGain(b)+extra)
+			q.Exponents = append(q.Exponents, comp.Depth+bandGain(b)+extra-raise)
 		}
 		return q
 	}
@@ -520,6 +579,9 @@ func stepToExpMant(delta float64, rb int) (eps, mu int) {
 // maxExponent is the largest quantization exponent the encoder uses, so
 // that the number of magnitude bit-planes stays within the coder's limit.
 const maxExponent = t1.MaxPlanes + 1 - encoderGuardBits
+
+// maxBandGain is the largest log2 sub-band gain.
+const maxBandGain = 2
 
 // bandGain returns the log2 sub-band gain of quantization entry b.
 func bandGain(b int) int {
@@ -784,6 +846,20 @@ func (e *encoder) codestream() ([]byte, error) {
 		for part, tp := range parts {
 			sot := buf.Len()
 			w.SOT(idx, part, len(parts))
+			if h := tp.header; h != nil {
+				if h.COD != nil {
+					w.COD(h.COD)
+				}
+				if h.QCD != nil {
+					w.QCD(h.QCD)
+				}
+				for _, c := range slices.Sorted(maps.Keys(h.QCC)) {
+					w.QCC(c, h.QCC[c])
+				}
+				for _, r := range h.RGN {
+					w.RGN(r)
+				}
+			}
 			if e.p.PackedHeaders == PackedInTile {
 				segs, err := splitHeaders(tp.headers, tp.headerLens)
 				if err != nil {
@@ -877,6 +953,7 @@ func splitHeaders(data []byte, lens []int) ([][]byte, error) {
 // packet headers (empty when stored in-line) with their individual
 // lengths, and the body.
 type tilePartData struct {
+	header     *codestream.TilePart // coding parameters, first tile-part only
 	headers    []byte
 	headerLens []int
 	body       []byte

@@ -60,7 +60,7 @@ func randomBlock(rng *rand.Rand, w, h, planes int) []int32 {
 func segments(enc *EncodedBlock, n int) []Segment {
 	var segs []Segment
 	start, passes := 0, 0
-	for i := 0; i < n; i++ {
+	for i := range n {
 		passes++
 		if enc.Passes[i].Terminated || i == n-1 {
 			end := enc.Passes[i].Len
@@ -257,9 +257,48 @@ func TestEncodeErrors(t *testing.T) {
 	if _, err := enc.Encode([]int32{1}, 0, 1, BandLL, Style{}, 1); err == nil {
 		t.Error("empty block was accepted")
 	}
+}
+
+// A block with more than MaxPlanes planes is decoded for its most
+// significant MaxPlanes planes: the result equals the decode of the block
+// with the lowest planes removed, and passes for the removed planes are
+// ignored.
+func TestDecodeExcessPlanes(t *testing.T) {
+	rng := rand.New(rand.NewPCG(9, 10))
+	enc := NewEncoder()
 	dec := NewDecoder()
-	if err := dec.Decode(make([]int32, 1), 1, 1, BandLL, Style{}, MaxPlanes+1, nil); err == nil {
-		t.Error("too many planes were accepted")
+	const total = MaxPlanes + 5
+	for _, style := range allStyles {
+		for range 10 {
+			w, h := 1+rng.IntN(32), 1+rng.IntN(32)
+			band := Band(rng.IntN(4))
+			// the block with the 5 lowest of its 35 planes removed
+			kept := randomBlock(rng, w, h, MaxPlanes)
+			kept[0] = 1<<MaxPlanes - 1
+			eb, err := enc.Encode(kept, w, h, band, style, MaxPlanes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			segs := segments(eb, len(eb.Passes))
+			want := make([]int32, w*h)
+			if err := dec.Decode(want, w, h, band, style, MaxPlanes-eb.ZeroPlanes, segs); err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(kept, toInteger(want)); diff != "" {
+				t.Fatalf("reference decode failed (-want +got):\n%s", diff)
+			}
+
+			// passes of the removed planes follow; they must be ignored
+			surplus := Segment{Data: []byte{0x12, 0x34, 0x56, 0x78}, Passes: 15}
+			got := make([]int32, w*h)
+			err = dec.Decode(got, w, h, band, style, total-eb.ZeroPlanes, append(segs, surplus))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Fatalf("%s: excess planes decoded differently (-want +got):\n%s", styleName(style), diff)
+			}
+		}
 	}
 }
 

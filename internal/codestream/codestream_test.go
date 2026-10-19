@@ -25,12 +25,10 @@ func testSIZ(ncomp int) *SIZ {
 
 func testCOD() *COD {
 	return &COD{
-		CodingStyle: CodingStyle{
-			EntropyBypass: true, Terminate: true, SegmentationSymbols: true,
-			Levels: 2, CodeBlockW: 6, CodeBlockH: 5, Reversible: true,
-			PrecinctSizes: []PrecinctSize{{7, 7}, {8, 6}, {15, 15}},
-		},
-		Progression: RPCL, Layers: 3, MCT: true, SOP: true, EPH: true,
+		EntropyBypass: true, Terminate: true, SegmentationSymbols: true,
+		Levels: 2, CodeBlockW: 6, CodeBlockH: 5, Reversible: true,
+		PrecinctSizes: []PrecinctSize{{7, 7}, {8, 6}, {15, 15}},
+		Progression:   RPCL, Layers: 3, MCT: true, SOP: true, EPH: true,
 	}
 }
 
@@ -80,8 +78,8 @@ func TestMarkerRoundTrips(t *testing.T) {
 	}
 
 	for _, cod := range []*COD{testCOD(), {
-		CodingStyle: CodingStyle{Levels: 1, CodeBlockW: 4, CodeBlockH: 4, PrecinctSizes: DefaultPrecincts(2)},
-		Layers:      1,
+		Levels: 1, CodeBlockW: 4, CodeBlockH: 4, PrecinctSizes: DefaultPrecincts(2),
+		Layers: 1,
 	}} {
 		q := testQCD()
 		if !cod.Reversible {
@@ -591,6 +589,14 @@ func TestValidation(t *testing.T) {
 	q = Quantization{Style: QuantNone}
 	if q.Validate(0) == nil {
 		t.Error("Quantization.Validate accepts an empty entry list")
+	}
+	// fewer entries than subbands are tolerated
+	q = Quantization{Style: QuantNone, Exponents: []int{1}}
+	if q.Validate(32) != nil {
+		t.Error("Quantization.Validate rejects a short entry list")
+	}
+	if q.Validate(-1) == nil {
+		t.Error("Quantization.Validate accepts negative levels")
 	}
 	if Progression(2).String() != "RPCL" {
 		t.Error("wrong Progression string")

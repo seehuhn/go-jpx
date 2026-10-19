@@ -109,7 +109,7 @@ func (d *tileDecoder) decodeTile(idx int, tps []tilePart) error {
 		return err
 	}
 	for c, tc := range tile.Comps {
-		if err := d.reconstruct(tile, c, tc); err != nil {
+		if err := d.reconstruct(c, tc); err != nil {
 			return err
 		}
 	}
@@ -157,7 +157,11 @@ func (d *tileDecoder) readPackets(tile *t2.Tile, tps []tilePart) error {
 			parts = append(parts, part{&t2.Stream{Data: d.ppm[tp.seq]}, &t2.Stream{Data: tp.Data}})
 		}
 	case usesPPT(tps):
-		var hdrs, bodies []byte
+		if err := d.chargeBytes(24 * len(tps)); err != nil {
+			return err
+		}
+		hs := make([][]byte, 0, len(tps))
+		nHdr, nBody := 0, 0
 		for _, tp := range tps {
 			h, err := tp.PackedHeaders(d.chargeBytes)
 			if d.budgetErr != nil {
@@ -166,11 +170,18 @@ func (d *tileDecoder) readPackets(tile *t2.Tile, tps []tilePart) error {
 			if err != nil {
 				break // damaged PPT segments end the usable headers
 			}
-			if err := d.chargeBytes(len(tp.Data)); err != nil {
-				return err
-			}
+			hs = append(hs, h)
+			nHdr += len(h)
+			nBody += len(tp.Data)
+		}
+		if err := d.chargeBytes(nHdr + nBody); err != nil {
+			return err
+		}
+		hdrs := make([]byte, 0, nHdr)
+		bodies := make([]byte, 0, nBody)
+		for i, h := range hs {
 			hdrs = append(hdrs, h...)
-			bodies = append(bodies, tp.Data...)
+			bodies = append(bodies, tps[i].Data...)
 		}
 		parts = []part{{&t2.Stream{Data: hdrs}, &t2.Stream{Data: bodies}}}
 	default:
@@ -226,7 +237,7 @@ func usesPPT(tps []tilePart) bool {
 // reconstruct decodes the code-blocks of tile-component c, dequantises
 // them into the component buffer and applies the inverse wavelet
 // transform.
-func (d *tileDecoder) reconstruct(tile *t2.Tile, c int, tc *t2.TileComp) error {
+func (d *tileDecoder) reconstruct(c int, tc *t2.TileComp) error {
 	levels := tc.Style.Levels - d.img.Reduce
 	r := dwt.Rect{
 		X0: ceilShift(tc.Bounds.X0, d.img.Reduce),
@@ -302,7 +313,7 @@ func (d *tileDecoder) reconstruct(tile *t2.Tile, c int, tc *t2.TileComp) error {
 	d.blocks = blocks
 	decode := func(w *blockWorker, b blockRef) error {
 		err := d.decodeBlock(w, c, tc, b.res, b.band, b.cb, style, r)
-		if err != nil && (d.failed() != nil || errors.Is(err, ErrUnsupported)) {
+		if err != nil && d.failed() != nil {
 			return err
 		}
 		return nil // corrupt block data: leave the block empty
@@ -357,9 +368,7 @@ func (d *tileDecoder) decodeBlocksConcurrently(blocks []blockRef, decode func(*b
 		next     atomic.Int64
 	)
 	for _, w := range d.pool[:n] {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				i := int(next.Add(1) - 1)
 				if i >= len(blocks) {
@@ -380,7 +389,7 @@ func (d *tileDecoder) decodeBlocksConcurrently(blocks []blockRef, decode func(*b
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	return firstErr
@@ -404,9 +413,9 @@ func (d *tileDecoder) decodeBlock(w *blockWorker, c int, tc *t2.TileComp, res *t
 	}
 	coefs := w.coefs[:bw*bh]
 	planes := tc.TotalPlanes(band) - cb.ZeroPlanes
-	if planes > t1.MaxPlanes {
-		return unsupported("more than 30 magnitude bit-planes in a code-block")
-	}
+	// tier-1 decodes at most MaxPlanes planes and drops the lowest ones
+	coded := min(planes, t1.MaxPlanes)
+	dropped := planes - coded
 	if n := cb.DataLen(); n > cap(w.segBuf) {
 		if err := d.chargeBytes(n); err != nil {
 			return err
@@ -417,7 +426,7 @@ func (d *tileDecoder) decodeBlock(w *blockWorker, c int, tc *t2.TileComp, res *t
 
 	// Tier-1 work is bounded by the declared passes, not by the data
 	// present, so it is charged to the budget like memory.
-	if err := d.chargeBytes(min(cb.Passes, t1.MaxPasses(planes)) * bw * bh); err != nil {
+	if err := d.chargeBytes(min(cb.Passes, t1.MaxPasses(coded)) * bw * bh); err != nil {
 		return err
 	}
 	if err := w.t1.Decode(coefs, bw, bh, band.Orient, style, planes, w.segs); err != nil {
@@ -442,57 +451,124 @@ func (d *tileDecoder) decodeBlock(w *blockWorker, c int, tc *t2.TileComp, res *t
 	by := offY + cb.Bounds.Y0 - band.Bounds.Y0
 	stride := r.X1 - r.X0
 
-	shift := tc.ROIShift
+	// Coefficients are brought to the scale of the samples divided by
+	// 2^trunc, so that all bands of the tile-component agree before the
+	// inverse transform.
+	sc := newCoefScale(tc.ROIShift, dropped)
+	trunc := depthTruncation(tc.Depth)
 	if tc.Style.Reversible {
+		// the fractional bit is shifted out as well
+		roiExp, bgExp := sc.roiExp-trunc-1, sc.bgExp-trunc-1
 		buf := d.ibuf[c]
 		for y := range bh {
-			row := buf[(by+y)*stride+bx:]
-			for x := range bw {
+			row := buf[(by+y)*stride+bx:][:bw]
+			for x := range row {
 				v := coefs[y*bw+x]
-				if shift > 0 {
-					v = roiDescale(v, shift)
+				mag, e := int64(v), bgExp
+				if v < 0 {
+					mag = -mag
 				}
-				if v >= 0 {
-					row[x] = v >> 1
-				} else {
-					row[x] = -((-v) >> 1)
+				if mag >= sc.roiMin {
+					mag, e = mag>>sc.roiDown, roiExp
 				}
+				r := shiftSat(mag, e)
+				if v < 0 {
+					r = -r
+				}
+				row[x] = r
 			}
 		}
 	} else {
 		buf := d.fbuf[c]
 		rb := tc.Depth + band.Gain
 		delta := math.Ldexp(1+float64(band.Mu)/2048, rb-band.Epsilon)
-		scale := float32(delta / 2)
+		roiScale := float32(math.Ldexp(delta/2, sc.roiExp-trunc))
+		bgScale := float32(math.Ldexp(delta/2, sc.bgExp-trunc))
 		for y := range bh {
-			row := buf[(by+y)*stride+bx:]
-			for x := range bw {
+			row := buf[(by+y)*stride+bx:][:bw]
+			for x := range row {
 				v := coefs[y*bw+x]
-				if shift > 0 {
-					v = roiDescale(v, shift)
+				if v == 0 {
+					// the scale may overflow to infinity for hostile
+					// parameters, and 0·∞ is not a number
+					row[x] = 0
+					continue
 				}
-				row[x] = float32(v) * scale
+				mag, scale := int64(v), bgScale
+				if v < 0 {
+					mag = -mag
+				}
+				if mag >= sc.roiMin {
+					mag, scale = mag>>sc.roiDown, roiScale
+				}
+				r := float32(mag) * scale
+				if v < 0 {
+					r = -r
+				}
+				row[x] = r
 			}
 		}
 	}
 	return nil
 }
 
-// roiDescale undoes the region-of-interest scaling of a coefficient in
-// the fractional-bit representation: magnitudes of at least 2^shift
-// belong to the region of interest and are scaled down.
-func roiDescale(v int32, shift int) int32 {
-	mag := v
-	if mag < 0 {
-		mag = -mag
+// coefScale maps the values decoded by tier-1 for a code-block to
+// coefficients, both in the fractional-bit representation.  A decoded
+// value v with |v| ≥ roiMin belongs to the region of interest and stands
+// for the coefficient magnitude (|v|>>roiDown)·2^roiExp; any other value
+// stands for |v|·2^bgExp.
+type coefScale struct {
+	roiMin  int64
+	roiDown int
+	roiExp  int
+	bgExp   int
+}
+
+// newCoefScale returns the mapping for a code-block of a component with
+// region-of-interest shift s (zero for none), from whose magnitudes
+// tier-1 dropped the lowest dropped bit-planes.
+//
+// Under the Maxshift method, a coefficient c of the region is coded as
+// c·2^s and every background coefficient is below 2^s.  A decoded value
+// v stands for v·2^dropped, so the region is told apart by
+// v·2^dropped ≥ 2·2^s (the factor two is the fractional bit).  When
+// s+1 ≤ dropped, every background coefficient was lost with the dropped
+// planes, and any non-zero value belongs to the region.  Background
+// values keep their scale and lose their lowest dropped bits, as in a
+// stream truncated after the decoded passes.
+func newCoefScale(s, dropped int) coefScale {
+	sc := coefScale{roiMin: math.MaxInt64, bgExp: dropped}
+	switch {
+	case s == 0:
+		// no region of interest
+	case s >= dropped:
+		// decoded magnitudes are below 2^31, so that larger thresholds
+		// are never reached
+		sc.roiMin = 1 << min(s-dropped+1, 32)
+		sc.roiDown = s - dropped
+	default:
+		sc.roiMin = 1
+		sc.roiExp = dropped - s
 	}
-	if mag>>1 >= 1<<uint(shift) {
-		if v < 0 {
-			return -(mag >> uint(shift))
+	return sc
+}
+
+// shiftSat returns m·2^e for a magnitude m ≥ 0, rounded towards zero and
+// saturated at the largest int32.
+func shiftSat(m int64, e int) int32 {
+	switch {
+	case m == 0:
+		return 0
+	case e >= 0:
+		if e >= 31 || m > math.MaxInt32>>e {
+			return math.MaxInt32
 		}
-		return mag >> uint(shift)
+		return int32(m << e)
+	case e <= -63:
+		return 0
+	default:
+		return int32(min(m>>-e, math.MaxInt32))
 	}
-	return v
 }
 
 // inverseMCT undoes the multiple component transform on the first three
@@ -509,35 +585,62 @@ func (d *tileDecoder) inverseMCT(tile *t2.Tile) error {
 	if c1.Style.Reversible != rev || c2.Style.Reversible != rev {
 		return errors.New("jpx: component transform on mixed transform types")
 	}
+	// The planes hold the samples divided by 2^trunc of their component.
+	// Components of equal truncation are transformed as they are; the
+	// reversible transform is then exact.  Otherwise the values are
+	// brought to the scale of the full samples first, and the results
+	// divided by their own component's factor again.
+	ta, tb, tc := depthTruncation(c0.Depth), depthTruncation(c1.Depth), depthTruncation(c2.Depth)
+	same := ta == tb && ta == tc
 	if rev {
 		a, b, c := d.ibuf[0], d.ibuf[1], d.ibuf[2]
 		if len(a) != len(b) || len(a) != len(c) {
 			return errors.New("jpx: component transform on buffers of different size")
 		}
-		for i := range a {
-			y, u, v := a[i], b[i], c[i]
-			g := y - (u+v)>>2
-			r := v + g
-			bb := u + g
-			a[i], b[i], c[i] = r, g, bb
+		if same {
+			for i := range a {
+				y, u, v := a[i], b[i], c[i]
+				g := y - (u+v)>>2
+				r := v + g
+				bb := u + g
+				a[i], b[i], c[i] = r, g, bb
+			}
+		} else {
+			for i := range a {
+				y, u, v := int64(a[i])<<ta, int64(b[i])<<tb, int64(c[i])<<tc
+				g := y - (u+v)>>2
+				r := v + g
+				bb := u + g
+				a[i], b[i], c[i] = sat32(r>>ta), sat32(g>>tb), sat32(bb>>tc)
+			}
 		}
 	} else {
 		a, b, c := d.fbuf[0], d.fbuf[1], d.fbuf[2]
 		if len(a) != len(b) || len(a) != len(c) {
 			return errors.New("jpx: component transform on buffers of different size")
 		}
+		sa, sb, sc := float32(1), float32(1), float32(1)
+		if !same {
+			sa, sb, sc = float32(math.Ldexp(1, ta)), float32(math.Ldexp(1, tb)), float32(math.Ldexp(1, tc))
+		}
 		for i := range a {
-			y, cb, cr := a[i], b[i], c[i]
-			a[i] = y + 1.402*cr
-			b[i] = y - 0.34413*cb - 0.71414*cr
-			c[i] = y + 1.772*cb
+			y, cb, cr := a[i]*sa, b[i]*sb, c[i]*sc
+			a[i] = (y + 1.402*cr) / sa
+			b[i] = (y - 0.34413*cb - 0.71414*cr) / sb
+			c[i] = (y + 1.772*cb) / sc
 		}
 	}
 	return nil
 }
 
+// sat32 returns v saturated to the range of int32.
+func sat32(v int64) int32 {
+	return int32(min(max(v, math.MinInt32), math.MaxInt32))
+}
+
 // store applies the DC level shift and clamping and copies the
-// tile-component into the output plane.
+// tile-component into the output plane.  Samples of components deeper
+// than MaxPrecision bits are stored divided by 2^depthTruncation(depth).
 func (d *tileDecoder) store(c int, tc *t2.TileComp) {
 	red := d.img.Reduce
 	tx0, ty0 := ceilShift(tc.Bounds.X0, red), ceilShift(tc.Bounds.Y0, red)
@@ -551,12 +654,14 @@ func (d *tileDecoder) store(c int, tc *t2.TileComp) {
 	py0 := ceilShift(ceilDiv(int(siz.YOsiz), tc.DY), red)
 	plane := &d.img.Planes[c]
 
+	// the sample range and DC offset, divided by 2^trunc like the samples
+	trunc := depthTruncation(tc.Depth)
 	var lo, hi, offset int64
 	if tc.Signed {
-		lo, hi = -(1 << uint(tc.Depth-1)), 1<<uint(tc.Depth-1)-1
+		lo, hi = -(1<<(tc.Depth-1))>>trunc, (1<<(tc.Depth-1)-1)>>trunc
 	} else {
-		lo, hi = 0, 1<<uint(tc.Depth)-1
-		offset = 1 << uint(tc.Depth-1)
+		lo, hi = 0, (1<<tc.Depth-1)>>trunc
+		offset = (1 << (tc.Depth - 1)) >> trunc
 	}
 	for y := range h {
 		dst := plane.Pix[(ty0-py0+y)*plane.Width+tx0-px0:][:w]

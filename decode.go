@@ -57,9 +57,14 @@ func readAll(r io.Reader, charge func(int) error) ([]byte, error) {
 
 // Decode reads a JPEG 2000 image from r.  Truncated or partially corrupt
 // codestreams produce the image decoded so far; an error is returned
-// only when the data cannot be interpreted at all or when a limit is
-// exceeded.  Without a budget in opt, memory use and decoding work are
-// not limited; untrusted input should be decoded with a budget.
+// only when the data cannot be interpreted at all, when a component is
+// deeper than MaxDepth bits, or when a limit is exceeded.  Without a
+// budget in opt, memory use and decoding work are not limited;
+// untrusted input should be decoded with a budget.
+//
+// Encode accepts every image Decode returns at full resolution, and
+// unless EncodeParams.Lossy is set, decoding the result gives the same
+// samples again.
 func Decode(r io.Reader, opt *Options) (*Image, error) {
 	if opt == nil {
 		opt = &Options{}
@@ -89,12 +94,14 @@ func Decode(r io.Reader, opt *Options) (*Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := checkSupported(m); err != nil {
-		return nil, err
-	}
 	h, err := buildHeader(wrapper, m, charge)
 	if err != nil {
 		return nil, err
+	}
+	for i, c := range h.Components {
+		if c.Depth > MaxDepth {
+			return nil, fmt.Errorf("jpx: component %d has unsupported depth %d", i, c.Depth)
+		}
 	}
 	if opt.Reduce >= h.Resolutions {
 		return nil, fmt.Errorf("jpx: cannot discard %d of %d resolution levels", opt.Reduce, h.Resolutions)
@@ -150,9 +157,7 @@ func decodeTiles(m *codestream.MainHeader, img *Image, charge func(int) error, p
 		return err
 	}
 	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			dec := newTileDecoder(m, img, charge, 1)
 			dec.ppm = shared.ppm
 			for {
@@ -175,7 +180,7 @@ func decodeTiles(m *codestream.MainHeader, img *Image, charge func(int) error, p
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	return firstErr

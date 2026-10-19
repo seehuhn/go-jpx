@@ -9,12 +9,13 @@
 //
 // Decoding returns the image samples as they are stored in the
 // codestream: one plane of signed 32-bit integers per component, at the
-// component's native bit depth and signedness, with the inverse wavelet
-// and component transforms applied but without any colour conversion or
-// palette lookup.  The header reports everything the file says about the
-// interpretation of the samples (colour specifications, channel
-// definitions, palette), and helper functions perform the common
-// conversions on request.
+// component's native bit depth and signedness (components deeper than
+// MaxPrecision bits are returned at MaxPrecision bits of precision), with
+// the inverse wavelet and component transforms applied but without any
+// colour conversion or palette lookup.  The header reports everything
+// the file says about the interpretation of the samples (colour
+// specifications, channel definitions, palette), and helper functions
+// perform the common conversions on request.
 //
 // The decoder is designed for untrusted input: it is written not to
 // panic, bounds its memory use and work through a [membudget.Budget],
@@ -23,19 +24,24 @@
 package jpx
 
 import (
-	"errors"
-	"fmt"
-
 	"seehuhn.de/go/membudget"
 )
 
 // Component describes one image component as coded in the codestream.
 type Component struct {
-	// Depth is the number of bits per sample.  JPEG 2000 allows 1 to 38;
-	// the decoder supports up to MaxDepth, the encoder up to
-	// MaxEncodeDepth.
+	// Depth is the number of bits per sample.  Decode and Encode accept
+	// 1 to MaxDepth; ReadHeader also reports deeper components.
 	Depth  int
 	Signed bool // samples are two's complement when true, unsigned otherwise
+
+	// Truncation is the number of low-order bits of each sample that the
+	// plane does not hold.  It is max(0, Depth-MaxPrecision): the plane
+	// holds the sample values divided by 2^Truncation, with Depth -
+	// Truncation significant bits.  The decoder computes these values
+	// from the coefficients without their lowest bits, so that a value
+	// may differ slightly from the exact quotient of a sample that had
+	// non-zero low bits.  Encode accepts only this value of Truncation.
+	Truncation int
 
 	// DX and DY are the horizontal and vertical sub-sampling factors:
 	// the component has one sample for every DX×DY points of the
@@ -43,7 +49,10 @@ type Component struct {
 	DX, DY int
 
 	// Width and Height give the number of samples of the component at
-	// full resolution.
+	// full resolution.  The samples cover component coordinates
+	// [ceil(XOffset/DX), ceil((XOffset+Width)/DX)) horizontally, and
+	// correspondingly vertically, where XOffset and Width are those of
+	// the image.
 	Width, Height int
 }
 
@@ -91,6 +100,8 @@ type Channel struct {
 type ColorSpec struct {
 	// Method is 1 for an enumerated colour space, 2 for a restricted ICC
 	// profile, 3 for any ICC profile and 4 for a vendor colour space.
+	// It is never 0: a colour specification box with the reserved
+	// method 0 is dropped when reading.
 	Method int
 
 	Precedence int
@@ -118,14 +129,25 @@ type Palette struct {
 	Columns []PaletteColumn
 }
 
-// PaletteColumn describes the values of one palette column.
+// PaletteColumn describes the values of one palette column.  Depth is
+// between 1 and 38.  Truncation is max(0, Depth-31): the entries of the
+// column hold the values divided by 2^Truncation, rounded towards
+// negative infinity, so that they fit an int32.  Encode accepts only this
+// value of Truncation and writes the entries multiplied by
+// 2^Truncation.
 type PaletteColumn struct {
-	Depth  int
-	Signed bool
+	Depth      int
+	Signed     bool
+	Truncation int
 }
 
 // Header describes a JPEG 2000 image without its sample data.
 type Header struct {
+	// XOffset and YOffset give the position of the image area on the
+	// reference grid: the image covers [XOffset, XOffset+Width) ×
+	// [YOffset, YOffset+Height).
+	XOffset, YOffset int
+
 	// Width and Height give the image size on the reference grid, after
 	// the image offset.  Components with DX or DY > 1 have fewer samples.
 	Width, Height int
@@ -156,7 +178,8 @@ type Header struct {
 	Tiles int
 }
 
-// Plane holds the samples of one component.
+// Plane holds the samples of one component, with at most MaxPrecision
+// significant bits; see Component.Truncation.
 type Plane struct {
 	Width, Height int
 	Pix           []int32 // Width*Height samples in row-major order
@@ -175,8 +198,9 @@ type Image struct {
 	Reduce int
 
 	// Planes holds one plane per component, in component order.  The
-	// samples are at the component's native depth and signedness.  With
-	// Reduce > 0 the planes are correspondingly smaller.
+	// samples are at the component's native depth and signedness,
+	// divided by 2^Truncation for components deeper than MaxPrecision
+	// bits.  With Reduce > 0 the planes are correspondingly smaller.
 	Planes []Plane
 }
 
@@ -204,15 +228,22 @@ type Options struct {
 	Workers int
 }
 
-// MaxDepth is the largest sample precision the decoder supports.
-const MaxDepth = 31
+// MaxDepth is the largest component depth that Decode and Encode accept;
+// ReadHeader also reports deeper components.  It is the largest depth for
+// which Encode can write every decoded image back exactly: the samples of
+// deeper components need more magnitude bit-planes than a codestream can
+// signal for some sub-bands.
+const MaxDepth = 34
 
-// ErrUnsupported is returned (possibly wrapped) when the input uses a
-// feature outside the supported subset of JPEG 2000.
-var ErrUnsupported = errors.New("jpx: unsupported feature")
+// MaxPrecision is the largest number of significant bits a Plane holds.
+// Components deeper than MaxPrecision bits are held without their lowest
+// bits, as described for Component.Truncation.
+const MaxPrecision = 24
 
-func unsupported(what string) error {
-	return fmt.Errorf("%w: %s", ErrUnsupported, what)
+// depthTruncation returns the number of low-order bits dropped from samples
+// of the given depth.
+func depthTruncation(depth int) int {
+	return max(0, depth-MaxPrecision)
 }
 
 // chargeFunc returns the charging callback used by the internal packages

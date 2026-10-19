@@ -219,10 +219,10 @@ func TestInvalidLengths(t *testing.T) {
 		"ihdr exceeds":    mutate(20, 1000),
 		"huge header box": mutate(12, 0xFFFFFFF0),
 		"no codestream":   bytes.Join([][]byte{signature, box("free", []byte{1})}, nil),
-		"jp2h to the end": bytes.Join([][]byte{signature, []byte{0, 0, 0, 0}, []byte("jp2h")}, nil),
-		"xl too small":    bytes.Join([][]byte{signature, []byte{0, 0, 0, 1}, []byte("free"), make([]byte, 8)}, nil),
-		"xl huge":         bytes.Join([][]byte{signature, []byte{0, 0, 0, 1}, []byte("free"), bytes.Repeat([]byte{0xFF}, 8)}, nil),
-		"truncated skip":  bytes.Join([][]byte{signature, []byte{0, 0, 1, 0}, []byte("free"), []byte{1}}, nil),
+		"jp2h to the end": bytes.Join([][]byte{signature, {0, 0, 0, 0}, []byte("jp2h")}, nil),
+		"xl too small":    bytes.Join([][]byte{signature, {0, 0, 0, 1}, []byte("free"), make([]byte, 8)}, nil),
+		"xl huge":         bytes.Join([][]byte{signature, {0, 0, 0, 1}, []byte("free"), bytes.Repeat([]byte{0xFF}, 8)}, nil),
+		"truncated skip":  bytes.Join([][]byte{signature, {0, 0, 1, 0}, []byte("free"), {1}}, nil),
 	}
 	for name, in := range cases {
 		if _, _, err := Read(bytes.NewReader(in), nil); err == nil {
@@ -423,6 +423,27 @@ func TestMalformedBoxesSkipped(t *testing.T) {
 	}
 }
 
+// Bytes after the last child of the header box, too few for a box
+// header, are padding.
+func TestJp2hTrailingBytes(t *testing.T) {
+	colr := box("colr", []byte{1, 0, 0, 0, 0, 0, 16})
+	for _, pad := range [][]byte{{0}, {1, 2, 3}, {0, 0, 0, 1, 'x', 'x', 'x'}, {0, 0, 0, 1, 'x', 'x', 'x', 'x', 0, 0}} {
+		h := readCodestream(t, jp2File(ihdrBox(), colr, pad))
+		if h.Image == nil || len(h.Colors) != 1 || h.Colors[0].EnumCS != 16 {
+			t.Errorf("pad=%x: header boxes lost: %+v", pad, h)
+		}
+	}
+}
+
+func TestColrReservedMethod(t *testing.T) {
+	reserved := box("colr", []byte{0, 0xff, 0xff, 0xf2, 0, 0, 16})
+	colr := box("colr", []byte{1, 0, 0, 0, 0, 0, 16})
+	h := readCodestream(t, jp2File(ihdrBox(), reserved, colr))
+	if len(h.Colors) != 1 || h.Colors[0].Method != 1 {
+		t.Errorf("colr with reserved method not dropped: %+v", h.Colors)
+	}
+}
+
 func TestBpccMismatch(t *testing.T) {
 	h := readCodestream(t, jp2File(ihdrBox(), box("bpcc", []byte{7, 7})))
 	if h.BitDepths != nil {
@@ -438,14 +459,67 @@ func TestBpccMismatch(t *testing.T) {
 	}
 }
 
-func TestDeepPaletteIgnored(t *testing.T) {
-	p := []byte{0, 1, 1, 31, 1, 2, 3, 4, 5}
+// Palette columns deeper than 31 bits keep their 31 most significant
+// bits.
+func TestDeepPalette(t *testing.T) {
+	// a 32-bit unsigned and a 38-bit signed column
+	p := []byte{0, 2, 2, 31, 0x80 | 37,
+		0x01, 0x02, 0x03, 0x05, 0x20, 0x00, 0x00, 0x00, 0x01,
+		0xFF, 0xFF, 0xFF, 0xFF, 0x3F, 0xFF, 0xFF, 0xFF, 0xFF}
 	h := readCodestream(t, jp2File(ihdrBox(), box("pclr", p)))
-	if h.Palette != nil {
-		t.Error("32 bit palette accepted")
+	if h.Palette == nil {
+		t.Fatal("deep palette dropped")
 	}
-	if h.Image == nil {
-		t.Error("other header boxes lost")
+	want := [][]int32{
+		{0x01020305 >> 1, -1 << 30},
+		{0xFFFFFFFF >> 1, -1},
+	}
+	if diff := cmp.Diff(want, h.Palette.Values); diff != "" {
+		t.Errorf("wrong palette values (-want +got):\n%s", diff)
+	}
+	wantDepths := []BitDepth{{32, false}, {38, true}}
+	if !slices.Equal(h.Palette.Depths, wantDepths) {
+		t.Errorf("wrong palette depths %v", h.Palette.Depths)
+	}
+}
+
+// Deep palette columns are written with their held values multiplied by
+// 2^PaletteTruncation(depth), and read back unchanged.
+func TestDeepPaletteWrite(t *testing.T) {
+	want := &Header{HasWrapper: true, Brand: "jp2 ",
+		Image: &ImageHeader{Height: 1, Width: 1, NC: 1, BPC: BitDepth{8, false}, C: 7},
+		Palette: &Palette{
+			Entries: 2,
+			Depths:  []BitDepth{{32, false}, {38, true}},
+			Values: [][]int32{
+				{0x01020305 >> 1, -1 << 30},
+				{0xFFFFFFFF >> 1, 1<<30 - 1},
+			},
+		},
+		ComponentMap: []ComponentMapping{{0, 1, 0}, {0, 1, 1}},
+	}
+	buf := &bytes.Buffer{}
+	if err := Write(buf, want, testCodestream); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte{0, 2, 2, 31, 0x80 | 37,
+		0x01, 0x02, 0x03, 0x04, 0xE0, 0x00, 0x00, 0x00, 0x00,
+		0xFF, 0xFF, 0xFF, 0xFE, 0x1F, 0xFF, 0xFF, 0xFF, 0x80}
+	if !bytes.Contains(buf.Bytes(), box("pclr", body)) {
+		t.Error("wrong pclr box")
+	}
+	got, _, err := Read(bytes.NewReader(buf.Bytes()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := cmp.Diff(want, got); d != "" {
+		t.Errorf("round trip failed (-want +got):\n%s", d)
+	}
+
+	// a held value whose multiple exceeds the column's range
+	want.Palette.Values[0][1] = 1 << 30
+	if err := Write(io.Discard, want, testCodestream); err == nil {
+		t.Error("palette value out of range accepted")
 	}
 }
 

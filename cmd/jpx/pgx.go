@@ -15,15 +15,17 @@ import (
 	"seehuhn.de/go/jpx"
 )
 
-// writePGX writes one component plane in PGX format.
+// writePGX writes one component plane in PGX format.  Truncated
+// components are written at the depth of their plane.
 func writePGX(w io.Writer, c jpx.Component, p *jpx.Plane) error {
 	sign := "+"
 	if c.Signed {
 		sign = "-"
 	}
+	depth := c.Depth - c.Truncation
 	bw := bufio.NewWriter(w)
-	fmt.Fprintf(bw, "PG ML %s %d %d %d\n", sign, c.Depth, p.Width, p.Height)
-	nb := (c.Depth + 7) / 8
+	fmt.Fprintf(bw, "PG ML %s %d %d %d\n", sign, depth, p.Width, p.Height)
+	nb := (depth + 7) / 8
 	for _, v := range p.Pix {
 		for i := nb - 1; i >= 0; i-- {
 			bw.WriteByte(byte(uint32(v) >> (8 * uint(i))))
@@ -49,7 +51,7 @@ func readPGX(r io.Reader) (jpx.Component, jpx.Plane, error) {
 	if _, err := fmt.Sscan(f[3]+" "+f[4]+" "+f[5], &c.Depth, &w, &h); err != nil {
 		return c, p, errors.New("invalid PGX header")
 	}
-	if c.Depth < 1 || c.Depth > jpx.MaxEncodeDepth || w < 1 || h < 1 || h > math.MaxInt32/w {
+	if c.Depth < 1 || c.Depth > jpx.MaxPrecision || w < 1 || h < 1 || h > math.MaxInt32/w {
 		return c, p, errors.New("invalid PGX header")
 	}
 	c.Signed = f[2] == "-"

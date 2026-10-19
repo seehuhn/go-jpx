@@ -134,6 +134,8 @@ type subBox struct {
 }
 
 // splitBoxes splits the payload of a superbox into its child boxes.
+// Trailing bytes too few for a box header are padding and are ignored.
+// A child whose declared length exceeds the payload is an error.
 func splitBoxes(data []byte, charge func(int) error) ([]subBox, error) {
 	// count the boxes first so that the result is allocated once
 	count := 0
@@ -154,10 +156,7 @@ func splitBoxes(data []byte, charge func(int) error) ([]subBox, error) {
 		return nil, err
 	}
 	res := make([]subBox, 0, count)
-	for len(data) > 0 {
-		if len(data) < 8 {
-			return nil, errTruncated
-		}
+	for len(data) >= 8 {
 		lbox := uint64(binary.BigEndian.Uint32(data))
 		typ := string(data[4:8])
 		hdr := uint64(8)
@@ -166,7 +165,7 @@ func splitBoxes(data []byte, charge func(int) error) ([]subBox, error) {
 			lbox = uint64(len(data))
 		case 1:
 			if len(data) < 16 {
-				return nil, errTruncated
+				return res, nil
 			}
 			lbox = binary.BigEndian.Uint64(data[8:])
 			hdr = 16

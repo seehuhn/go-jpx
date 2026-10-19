@@ -5,6 +5,7 @@ package jpx
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"testing"
 
@@ -19,7 +20,8 @@ func newTestBudget(limit int64) *membudget.Budget { return membudget.New(limit) 
 // below: a single tile with a single empty packet per resolution level
 // and component.
 type minimalParams struct {
-	width, height int
+	width, height int // reference grid size
+	xOff, yOff    int // image offset
 	comps         []codestream.ComponentSIZ
 	levels        int
 	tileSize      int // 0 = one tile
@@ -35,6 +37,7 @@ func minimalCodestream(p minimalParams) []byte {
 	w.SOC()
 	siz := &codestream.SIZ{
 		Xsiz: uint32(p.width), Ysiz: uint32(p.height),
+		XOsiz: uint32(p.xOff), YOsiz: uint32(p.yOff),
 		XTsiz: uint32(p.width), YTsiz: uint32(p.height),
 		Components: p.comps,
 	}
@@ -43,15 +46,13 @@ func minimalCodestream(p minimalParams) []byte {
 	}
 	w.SIZ(siz)
 	cod := &codestream.COD{
-		CodingStyle: codestream.CodingStyle{
-			Levels:        p.levels,
-			CodeBlockW:    6,
-			CodeBlockH:    6,
-			Reversible:    true,
-			PrecinctSizes: codestream.DefaultPrecincts(p.levels + 1),
-		},
-		Layers: 1,
-		MCT:    p.mct,
+		Levels:        p.levels,
+		CodeBlockW:    6,
+		CodeBlockH:    6,
+		Reversible:    true,
+		PrecinctSizes: codestream.DefaultPrecincts(p.levels + 1),
+		Layers:        1,
+		MCT:           p.mct,
 	}
 	w.COD(cod)
 	q := &codestream.Quantization{Style: codestream.QuantNone, GuardBits: 2}
@@ -251,6 +252,8 @@ func fuzzSeeds(f *testing.F) [][]byte {
 		{alpha, EncodeParams{Wrapper: true, Lossy: true, Layers: 2}},
 		{testImage(20, 14, rgb(8), 10), EncodeParams{TileWidth: 8, TileHeight: 8, PackedHeaders: PackedInMain, TileParts: 2, SOP: true, EPH: true}},
 		{testImage(20, 14, gray(8), 10), EncodeParams{PackedHeaders: PackedInTile, Bypass: true, Terminate: true, Progression: RPCL}},
+		{truncatedImage(12, 10, 1, MaxDepth, false, 11), EncodeParams{Levels: 2}},
+		{truncatedImage(10, 12, 3, 30, true, 12), EncodeParams{Wrapper: true, Levels: 1}},
 	} {
 		var buf bytes.Buffer
 		if err := Encode(&buf, c.img, &c.p); err != nil {
@@ -258,6 +261,8 @@ func fuzzSeeds(f *testing.F) [][]byte {
 		}
 		seeds = append(seeds, buf.Bytes())
 	}
+	// deep samples with non-zero low-order bits
+	seeds = append(seeds, patchMainHeader(f, seeds[len(seeds)-1], 32, 1))
 	return seeds
 }
 
@@ -313,5 +318,71 @@ func TestDecodeNilBudget(t *testing.T) {
 	}
 	if got.Width != img.Width || got.Height != img.Height || len(got.Planes) != 3 {
 		t.Errorf("got %dx%d with %d planes", got.Width, got.Height, len(got.Planes))
+	}
+}
+
+// A colour specification with the reserved method 0 is dropped, so that
+// the decoded image can be written back.
+func TestDecodeColrReservedMethod(t *testing.T) {
+	ihdr := make([]byte, 14)
+	binary.BigEndian.PutUint32(ihdr, 16)
+	binary.BigEndian.PutUint32(ihdr[4:], 16)
+	binary.BigEndian.PutUint16(ihdr[8:], 1)
+	ihdr[10] = 7
+	ihdr[11] = 7
+	colr := []byte{0, 0xff, 0xff, 0xf2, 0, 0, 16}
+	file := jp2File(t, boxOf("ihdr", ihdr), boxOf("colr", colr))
+	img, err := Decode(bytes.NewReader(file), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(img.ColorSpecs) != 0 {
+		t.Fatalf("reserved colour specification kept: %+v", img.ColorSpecs)
+	}
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, &EncodeParams{Wrapper: true}); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Decode(bytes.NewReader(buf.Bytes()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff(img.Planes, again.Planes); diff != "" {
+		t.Errorf("round trip failed (-want +got):\n%s", diff)
+	}
+}
+
+// A header box ending in a few stray bytes still decodes.
+func TestDecodeJp2hTrailingBytes(t *testing.T) {
+	ihdr := make([]byte, 14)
+	binary.BigEndian.PutUint32(ihdr, 16)
+	binary.BigEndian.PutUint32(ihdr[4:], 16)
+	binary.BigEndian.PutUint16(ihdr[8:], 1)
+	ihdr[10] = 7
+	ihdr[11] = 7
+	colr := []byte{1, 0, 0, 0, 0, 0, 17}
+	file := jp2File(t, boxOf("ihdr", ihdr), boxOf("colr", colr), []byte{1, 2, 3})
+	img, err := Decode(bytes.NewReader(file), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Width != 16 || img.Height != 16 || len(img.Planes) != 1 {
+		t.Errorf("unexpected image %dx%d with %d planes", img.Width, img.Height, len(img.Planes))
+	}
+}
+
+// A QCD with fewer entries than the decomposition levels need decodes.
+func TestDecodeFewQuantEntries(t *testing.T) {
+	for _, n := range []int{1, 4} {
+		s := hostileBase(64, 64, 1, 1, 1, 5, codestream.LRCP, 15)
+		s.qcd.Exponents = s.qcd.Exponents[:n]
+		s.addPart(nil, []byte{0})
+		img, err := Decode(bytes.NewReader(s.mustBuild(t)), nil)
+		if err != nil {
+			t.Fatalf("n=%d: %v", n, err)
+		}
+		if img.Width != 64 || img.Height != 64 {
+			t.Errorf("n=%d: image is %dx%d", n, img.Width, img.Height)
+		}
 	}
 }

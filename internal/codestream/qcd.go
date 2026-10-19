@@ -19,10 +19,15 @@ type Quantization struct {
 	Mantissas []int
 }
 
-// Validate checks that q is well formed and provides entries for every
-// subband of a decomposition with the given number of levels.  QuantNone and
-// QuantExpounded need at least 3*levels+1 entries, QuantDerived exactly one.
-// Mantissas must be parallel to Exponents, except for QuantNone.
+// Validate checks that q is well formed for a decomposition with the given
+// number of levels.  It requires at least one entry, exactly one for
+// QuantDerived, and Mantissas parallel to Exponents except for QuantNone.
+//
+// QuantNone and QuantExpounded nominally need 3*levels+1 entries, one per
+// subband, but fewer are accepted: codestreams in circulation declare more
+// decomposition levels than they provide entries for.  Callers must
+// therefore map subbands to entries themselves, without assuming one
+// entry per subband.
 func (q *Quantization) Validate(levels int) error {
 	if err := q.check(); err != nil {
 		return err
@@ -30,14 +35,6 @@ func (q *Quantization) Validate(levels int) error {
 	if levels < 0 {
 		return errors.New("negative number of decomposition levels")
 	}
-	// Codestreams in circulation declare more decomposition levels than
-	// they provide quantization entries for; the missing entries belong
-	// to sub-bands without any samples.  The caller reuses the last
-	// entry for them, so only the presence of at least one is required.
-	if len(q.Exponents) < 1 {
-		return errors.New("quantization without entries")
-	}
-	_ = levels
 	return nil
 }
 

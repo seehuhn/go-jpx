@@ -5,7 +5,6 @@ package jpx
 
 import (
 	"errors"
-	"fmt"
 	"io"
 
 	"seehuhn.de/go/jpx/internal/codestream"
@@ -15,8 +14,9 @@ import (
 
 // ReadHeader parses the file structure and the main codestream header of
 // a JPEG 2000 image.  It reads only as far as needed and keeps only the
-// header information; the sample data is not decoded.  Unlike Decode it
-// also reports images whose precision exceeds what the decoder supports.
+// header information; the sample data is not decoded.  Unlike Decode, it
+// also reports images with components deeper than MaxDepth bits, so that
+// a caller can tell why Decode rejects them.
 //
 // Memory use is bounded by the size of the header boxes and marker
 // segments actually read, and charged to budget, which may be nil.  JPX
@@ -40,6 +40,8 @@ func ReadHeader(r io.Reader, budget *membudget.Budget) (*Header, error) {
 func buildHeader(w *jp2.Header, m *codestream.MainHeader, charge func(int) error) (*Header, error) {
 	siz := &m.SIZ
 	h := &Header{
+		XOffset: int(siz.XOsiz),
+		YOffset: int(siz.YOsiz),
 		Width:   int(siz.Xsiz - siz.XOsiz),
 		Height:  int(siz.Ysiz - siz.YOsiz),
 		Wrapped: w.HasWrapper,
@@ -63,12 +65,13 @@ func buildHeader(w *jp2.Header, m *codestream.MainHeader, charge func(int) error
 	h.Components = make([]Component, len(siz.Components))
 	for i, c := range siz.Components {
 		h.Components[i] = Component{
-			Depth:  c.Depth,
-			Signed: c.Signed,
-			DX:     c.XRsiz,
-			DY:     c.YRsiz,
-			Width:  ceilDiv(int(siz.Xsiz), c.XRsiz) - ceilDiv(int(siz.XOsiz), c.XRsiz),
-			Height: ceilDiv(int(siz.Ysiz), c.YRsiz) - ceilDiv(int(siz.YOsiz), c.YRsiz),
+			Depth:      c.Depth,
+			Signed:     c.Signed,
+			Truncation: depthTruncation(c.Depth),
+			DX:         c.XRsiz,
+			DY:         c.YRsiz,
+			Width:      ceilDiv(int(siz.Xsiz), c.XRsiz) - ceilDiv(int(siz.XOsiz), c.XRsiz),
+			Height:     ceilDiv(int(siz.Ysiz), c.YRsiz) - ceilDiv(int(siz.YOsiz), c.YRsiz),
 		}
 	}
 
@@ -99,7 +102,7 @@ func buildHeader(w *jp2.Header, m *codestream.MainHeader, charge func(int) error
 	if w.Palette != nil && validMapping(w, len(h.Components)) {
 		h.Palette = &Palette{Entries: w.Palette.Values}
 		for _, d := range w.Palette.Depths {
-			h.Palette.Columns = append(h.Palette.Columns, PaletteColumn{Depth: d.Depth, Signed: d.Signed})
+			h.Palette.Columns = append(h.Palette.Columns, PaletteColumn{Depth: d.Depth, Signed: d.Signed, Truncation: jp2.PaletteTruncation(d.Depth)})
 		}
 	}
 
@@ -168,14 +171,3 @@ func buildChannels(w *jp2.Header, h *Header) []Channel {
 }
 
 func ceilDiv(a, b int) int { return (a + b - 1) / b }
-
-// checkSupported rejects codestreams that use features outside the
-// supported subset.
-func checkSupported(m *codestream.MainHeader) error {
-	for i, c := range m.SIZ.Components {
-		if c.Depth > MaxDepth {
-			return unsupported(fmt.Sprintf("component %d has %d bits per sample", i, c.Depth))
-		}
-	}
-	return nil
-}
