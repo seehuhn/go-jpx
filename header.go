@@ -9,6 +9,7 @@ import (
 
 	"seehuhn.de/go/jpx/internal/codestream"
 	"seehuhn.de/go/jpx/internal/jp2"
+	"seehuhn.de/go/jpx/internal/t2"
 	"seehuhn.de/go/membudget"
 )
 
@@ -70,8 +71,8 @@ func buildHeader(w *jp2.Header, m *codestream.MainHeader, charge func(int) error
 			Truncation: depthTruncation(c.Depth),
 			DX:         c.XRsiz,
 			DY:         c.YRsiz,
-			Width:      ceilDiv(int(siz.Xsiz), c.XRsiz) - ceilDiv(int(siz.XOsiz), c.XRsiz),
-			Height:     ceilDiv(int(siz.Ysiz), c.YRsiz) - ceilDiv(int(siz.YOsiz), c.YRsiz),
+			Width:      t2.CeilDiv(int(siz.Xsiz), c.XRsiz) - t2.CeilDiv(int(siz.XOsiz), c.XRsiz),
+			Height:     t2.CeilDiv(int(siz.Ysiz), c.YRsiz) - t2.CeilDiv(int(siz.YOsiz), c.YRsiz),
 		}
 	}
 
@@ -169,5 +170,3 @@ func buildChannels(w *jp2.Header, h *Header) []Channel {
 	}
 	return channels
 }
-
-func ceilDiv(a, b int) int { return (a + b - 1) / b }

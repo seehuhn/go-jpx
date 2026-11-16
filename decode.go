@@ -16,6 +16,7 @@ import (
 
 	"seehuhn.de/go/jpx/internal/codestream"
 	"seehuhn.de/go/jpx/internal/jp2"
+	"seehuhn.de/go/jpx/internal/t2"
 )
 
 // readChunk is the unit in which input is read, so that the budget is
@@ -212,10 +213,10 @@ func (img *Image) allocPlanes(m *codestream.MainHeader, charge func(int) error) 
 	siz := &m.SIZ
 	img.Planes = make([]Plane, len(siz.Components))
 	for c, cs := range siz.Components {
-		x0 := ceilShift(ceilDiv(int(siz.XOsiz), cs.XRsiz), img.Reduce)
-		x1 := ceilShift(ceilDiv(int(siz.Xsiz), cs.XRsiz), img.Reduce)
-		y0 := ceilShift(ceilDiv(int(siz.YOsiz), cs.YRsiz), img.Reduce)
-		y1 := ceilShift(ceilDiv(int(siz.Ysiz), cs.YRsiz), img.Reduce)
+		x0 := t2.CeilShift(t2.CeilDiv(int(siz.XOsiz), cs.XRsiz), img.Reduce)
+		x1 := t2.CeilShift(t2.CeilDiv(int(siz.Xsiz), cs.XRsiz), img.Reduce)
+		y0 := t2.CeilShift(t2.CeilDiv(int(siz.YOsiz), cs.YRsiz), img.Reduce)
+		y1 := t2.CeilShift(t2.CeilDiv(int(siz.Ysiz), cs.YRsiz), img.Reduce)
 		w, h := x1-x0, y1-y0
 		if w < 0 || h < 0 || (w > 0 && h > math.MaxInt/8/w) {
 			return errors.New("jpx: image too large")
@@ -267,5 +268,3 @@ func collectTileParts(cr *codestream.Reader, numTiles int, charge func(int) erro
 		parts[tp.Index] = append(parts[tp.Index], tilePart{tp, seq})
 	}
 }
-
-func ceilShift(a, s int) int { return (a + (1 << uint(s)) - 1) >> uint(s) }

@@ -49,10 +49,10 @@ func newTestTile(t *testing.T, bounds Rect, layers int, order codestream.Progres
 			DY:    tcs.dy,
 		}
 		tc.Bounds = Rect{
-			X0: ceilDiv(bounds.X0, tcs.dx),
-			Y0: ceilDiv(bounds.Y0, tcs.dy),
-			X1: ceilDiv(bounds.X1, tcs.dx),
-			Y1: ceilDiv(bounds.Y1, tcs.dy),
+			X0: CeilDiv(bounds.X0, tcs.dx),
+			Y0: CeilDiv(bounds.Y0, tcs.dy),
+			X1: CeilDiv(bounds.X1, tcs.dx),
+			Y1: CeilDiv(bounds.Y1, tcs.dy),
 		}
 		if err := tc.buildResolutions(nil); err != nil {
 			t.Fatal(err)

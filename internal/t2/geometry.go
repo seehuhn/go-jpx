@@ -23,11 +23,21 @@ func (r Rect) Dy() int { return r.Y1 - r.Y0 }
 // Empty reports whether r contains no points.
 func (r Rect) Empty() bool { return r.X1 <= r.X0 || r.Y1 <= r.Y0 }
 
-// ceilDiv returns ceil(a/b) for a ≥ 0, b > 0.
-func ceilDiv(a, b int) int { return (a + b - 1) / b }
+// CeilDiv returns ceil(a/b) for a ≥ 0, b > 0.
+func CeilDiv(a, b int) int {
+	if a%b != 0 {
+		return a/b + 1
+	}
+	return a / b
+}
 
-// ceilShift returns ceil(a / 2^s) for a ≥ 0.
-func ceilShift(a, s int) int { return (a + (1 << uint(s)) - 1) >> uint(s) }
+// CeilShift returns ceil(a / 2^s) for a ≥ 0, s ≥ 0.
+func CeilShift(a, s int) int {
+	if a&(1<<uint(s)-1) != 0 {
+		return a>>uint(s) + 1
+	}
+	return a >> uint(s)
+}
 
 // Tile is the coded structure of one tile: its components, resolution
 // levels, precincts and code-blocks together with the packet decoding
@@ -166,12 +176,7 @@ func NewTile(m *codestream.MainHeader, tps []*codestream.TilePart, idx int, char
 	}
 	p, q := idx%nx, idx/nx
 	t := &Tile{Index: idx}
-	t.Bounds = Rect{
-		X0: max(int(siz.XTOsiz)+p*int(siz.XTsiz), int(siz.XOsiz)),
-		Y0: max(int(siz.YTOsiz)+q*int(siz.YTsiz), int(siz.YOsiz)),
-		X1: min(int(siz.XTOsiz)+(p+1)*int(siz.XTsiz), int(siz.Xsiz)),
-		Y1: min(int(siz.YTOsiz)+(q+1)*int(siz.YTsiz), int(siz.Ysiz)),
-	}
+	t.Bounds = tileBounds(siz, p, q)
 	if t.Bounds.Empty() {
 		return nil, errors.New("t2: empty tile")
 	}
@@ -218,10 +223,10 @@ func NewTile(m *codestream.MainHeader, tps []*codestream.TilePart, idx int, char
 			DY:       cs.YRsiz,
 		}
 		tc.Bounds = Rect{
-			X0: ceilDiv(t.Bounds.X0, cs.XRsiz),
-			Y0: ceilDiv(t.Bounds.Y0, cs.YRsiz),
-			X1: ceilDiv(t.Bounds.X1, cs.XRsiz),
-			Y1: ceilDiv(t.Bounds.Y1, cs.YRsiz),
+			X0: CeilDiv(t.Bounds.X0, cs.XRsiz),
+			Y0: CeilDiv(t.Bounds.Y0, cs.YRsiz),
+			X1: CeilDiv(t.Bounds.X1, cs.XRsiz),
+			Y1: CeilDiv(t.Bounds.Y1, cs.YRsiz),
 		}
 		if err := tc.buildResolutions(charge); err != nil {
 			return nil, err
@@ -229,6 +234,18 @@ func NewTile(m *codestream.MainHeader, tps []*codestream.TilePart, idx int, char
 		t.Comps[c] = tc
 	}
 	return t, nil
+}
+
+// tileBounds returns the part of the reference grid covered by the tile in
+// column p and row q.  The bounds are computed in int64, because the tile
+// size is a 32-bit unsigned value and need not fit into an int.
+func tileBounds(siz *codestream.SIZ, p, q int) Rect {
+	return Rect{
+		X0: int(max(int64(siz.XTOsiz)+int64(p)*int64(siz.XTsiz), int64(siz.XOsiz))),
+		Y0: int(max(int64(siz.YTOsiz)+int64(q)*int64(siz.YTsiz), int64(siz.YOsiz))),
+		X1: int(min(int64(siz.XTOsiz)+int64(p+1)*int64(siz.XTsiz), int64(siz.Xsiz))),
+		Y1: int(min(int64(siz.YTOsiz)+int64(q+1)*int64(siz.YTsiz), int64(siz.Ysiz))),
+	}
 }
 
 func (tc *TileComp) buildResolutions(charge Charge) error {
@@ -241,10 +258,10 @@ func (tc *TileComp) buildResolutions(charge Charge) error {
 		res := &Resolution{Level: r}
 		shift := nl - r
 		res.Bounds = Rect{
-			X0: ceilShift(tc.Bounds.X0, shift),
-			Y0: ceilShift(tc.Bounds.Y0, shift),
-			X1: ceilShift(tc.Bounds.X1, shift),
-			Y1: ceilShift(tc.Bounds.Y1, shift),
+			X0: CeilShift(tc.Bounds.X0, shift),
+			Y0: CeilShift(tc.Bounds.Y0, shift),
+			X1: CeilShift(tc.Bounds.X1, shift),
+			Y1: CeilShift(tc.Bounds.Y1, shift),
 		}
 		ps := tc.Style.PrecinctSizes[r]
 		res.PPx, res.PPy = ps.PPx, ps.PPy
@@ -252,8 +269,8 @@ func (tc *TileComp) buildResolutions(charge Charge) error {
 			return errors.New("t2: precinct size too small")
 		}
 		if !res.Bounds.Empty() {
-			res.PW = ceilShift(res.Bounds.X1, res.PPx) - res.Bounds.X0>>uint(res.PPx)
-			res.PH = ceilShift(res.Bounds.Y1, res.PPy) - res.Bounds.Y0>>uint(res.PPy)
+			res.PW = CeilShift(res.Bounds.X1, res.PPx) - res.Bounds.X0>>uint(res.PPx)
+			res.PH = CeilShift(res.Bounds.Y1, res.PPy) - res.Bounds.Y0>>uint(res.PPy)
 		}
 
 		// code-block size within the bands of this level
@@ -309,10 +326,10 @@ func (tc *TileComp) newBand(r int, o t1.Band, xcb, ycb int) (*Band, error) {
 		offX, offY = xob<<uint(nb-1), yob<<uint(nb-1)
 	}
 	b.Bounds = Rect{
-		X0: ceilDiv(max(tc.Bounds.X0-offX, 0), den),
-		Y0: ceilDiv(max(tc.Bounds.Y0-offY, 0), den),
-		X1: ceilDiv(max(tc.Bounds.X1-offX, 0), den),
-		Y1: ceilDiv(max(tc.Bounds.Y1-offY, 0), den),
+		X0: CeilDiv(max(tc.Bounds.X0-offX, 0), den),
+		Y0: CeilDiv(max(tc.Bounds.Y0-offY, 0), den),
+		X1: CeilDiv(max(tc.Bounds.X1-offX, 0), den),
+		Y1: CeilDiv(max(tc.Bounds.Y1-offY, 0), den),
 	}
 
 	// index of the band's quantization parameters: LL first, then the
@@ -421,8 +438,8 @@ func newPrecinctBand(b *Band, pr Rect, level int, charge Charge) (*PrecinctBand,
 	}
 	cbx0 := br.X0 >> uint(b.XCB)
 	cby0 := br.Y0 >> uint(b.YCB)
-	pb.CBW = ceilShift(br.X1, b.XCB) - cbx0
-	pb.CBH = ceilShift(br.Y1, b.YCB) - cby0
+	pb.CBW = CeilShift(br.X1, b.XCB) - cbx0
+	pb.CBH = CeilShift(br.Y1, b.YCB) - cby0
 	n := pb.CBW * pb.CBH
 	// code-block records plus two tag trees of roughly 4/3 n nodes each
 	if err := charge.charge(n*(96+2*32*4/3) + 128); err != nil {

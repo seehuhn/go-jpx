@@ -136,8 +136,8 @@ func (e *encoder) transformComponents(tile *t2.Tile) ([]sampleBuffer, error) {
 			return nil, err
 		}
 		plane := &e.img.Planes[c]
-		px0 := ceilDiv(int(siz.XOsiz), tc.DX)
-		py0 := ceilDiv(int(siz.YOsiz), tc.DY)
+		px0 := t2.CeilDiv(int(siz.XOsiz), tc.DX)
+		py0 := t2.CeilDiv(int(siz.YOsiz), tc.DY)
 		// the DC offset at the scale of the plane
 		var shift int32
 		if !tc.Signed {
@@ -264,7 +264,7 @@ func (e *encoder) encodeComponent(td *tileData, c int, tc *t2.TileComp, buf samp
 						}
 					}
 					if tc.ROIShift > 0 {
-						e.applyROI(block, cb, band, tc, res)
+						e.applyROI(block, cb, tc, res)
 					}
 					eb, err := e.t1.Encode(block, w, h, band.Orient, style, planes)
 					if err != nil {
@@ -451,7 +451,7 @@ func quantStep(tc *t2.TileComp, band *t2.Band) float64 {
 // applyROI scales the coefficients of the region of interest up by the
 // component's shift.  The region is mapped into the band by scaling the
 // reference-grid rectangle to the band's resolution.
-func (e *encoder) applyROI(block []int32, cb *t2.CodeBlock, band *t2.Band, tc *t2.TileComp, res *t2.Resolution) {
+func (e *encoder) applyROI(block []int32, cb *t2.CodeBlock, tc *t2.TileComp, res *t2.Resolution) {
 	roi := e.p.ROI
 	nb := tc.Style.Levels - res.Level + 1
 	if res.Level == 0 {
@@ -461,10 +461,10 @@ func (e *encoder) applyROI(block []int32, cb *t2.CodeBlock, band *t2.Band, tc *t
 	// filter support
 	den := tc.DX << uint(nb)
 	rx0 := roi.X0/den - 1
-	rx1 := ceilDiv(roi.X1, den) + 1
+	rx1 := t2.CeilDiv(roi.X1, den) + 1
 	den = tc.DY << uint(nb)
 	ry0 := roi.Y0/den - 1
-	ry1 := ceilDiv(roi.Y1, den) + 1
+	ry1 := t2.CeilDiv(roi.Y1, den) + 1
 	w := cb.Bounds.Dx()
 	for y := cb.Bounds.Y0; y < cb.Bounds.Y1; y++ {
 		if y < ry0 || y >= ry1 {

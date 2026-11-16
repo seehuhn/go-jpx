@@ -240,10 +240,10 @@ func usesPPT(tps []tilePart) bool {
 func (d *tileDecoder) reconstruct(c int, tc *t2.TileComp) error {
 	levels := tc.Style.Levels - d.img.Reduce
 	r := dwt.Rect{
-		X0: ceilShift(tc.Bounds.X0, d.img.Reduce),
-		Y0: ceilShift(tc.Bounds.Y0, d.img.Reduce),
-		X1: ceilShift(tc.Bounds.X1, d.img.Reduce),
-		Y1: ceilShift(tc.Bounds.Y1, d.img.Reduce),
+		X0: t2.CeilShift(tc.Bounds.X0, d.img.Reduce),
+		Y0: t2.CeilShift(tc.Bounds.Y0, d.img.Reduce),
+		X1: t2.CeilShift(tc.Bounds.X1, d.img.Reduce),
+		Y1: t2.CeilShift(tc.Bounds.Y1, d.img.Reduce),
 	}
 	w, h := r.X1-r.X0, r.Y1-r.Y0
 	n := w * h
@@ -643,15 +643,15 @@ func sat32(v int64) int32 {
 // than MaxPrecision bits are stored divided by 2^depthTruncation(depth).
 func (d *tileDecoder) store(c int, tc *t2.TileComp) {
 	red := d.img.Reduce
-	tx0, ty0 := ceilShift(tc.Bounds.X0, red), ceilShift(tc.Bounds.Y0, red)
-	tx1, ty1 := ceilShift(tc.Bounds.X1, red), ceilShift(tc.Bounds.Y1, red)
+	tx0, ty0 := t2.CeilShift(tc.Bounds.X0, red), t2.CeilShift(tc.Bounds.Y0, red)
+	tx1, ty1 := t2.CeilShift(tc.Bounds.X1, red), t2.CeilShift(tc.Bounds.Y1, red)
 	w, h := tx1-tx0, ty1-ty0
 	if w <= 0 || h <= 0 {
 		return
 	}
 	siz := &d.m.SIZ
-	px0 := ceilShift(ceilDiv(int(siz.XOsiz), tc.DX), red)
-	py0 := ceilShift(ceilDiv(int(siz.YOsiz), tc.DY), red)
+	px0 := t2.CeilShift(t2.CeilDiv(int(siz.XOsiz), tc.DX), red)
+	py0 := t2.CeilShift(t2.CeilDiv(int(siz.YOsiz), tc.DY), red)
 	plane := &d.img.Planes[c]
 
 	// the sample range and DC offset, divided by 2^trunc like the samples

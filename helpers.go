@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 
+	"seehuhn.de/go/jpx/internal/t2"
 	"seehuhn.de/go/membudget"
 )
 
@@ -148,8 +149,8 @@ func Upsample(img *Image, budget *membudget.Budget) (*Image, error) {
 	}
 	charge := chargeFunc(budget)
 	r := img.Reduce
-	gx0, gx1 := ceilShift(img.XOffset, r), ceilShift(img.XOffset+img.Width, r)
-	gy0, gy1 := ceilShift(img.YOffset, r), ceilShift(img.YOffset+img.Height, r)
+	gx0, gx1 := t2.CeilShift(img.XOffset, r), t2.CeilShift(img.XOffset+img.Width, r)
+	gy0, gy1 := t2.CeilShift(img.YOffset, r), t2.CeilShift(img.YOffset+img.Height, r)
 	w, h := gx1-gx0, gy1-gy0
 	if w < 0 || h < 0 || (w > 0 && h > math.MaxInt/8/w) {
 		return nil, errors.New("jpx: image too large")
@@ -161,10 +162,10 @@ func Upsample(img *Image, budget *membudget.Budget) (*Image, error) {
 		if comp.DX < 1 || comp.DY < 1 {
 			return nil, fmt.Errorf("jpx: component %d has invalid sub-sampling", c)
 		}
-		cx0 := ceilShift(ceilDiv(img.XOffset, comp.DX), r)
-		cx1 := ceilShift(ceilDiv(img.XOffset+img.Width, comp.DX), r)
-		cy0 := ceilShift(ceilDiv(img.YOffset, comp.DY), r)
-		cy1 := ceilShift(ceilDiv(img.YOffset+img.Height, comp.DY), r)
+		cx0 := t2.CeilShift(t2.CeilDiv(img.XOffset, comp.DX), r)
+		cx1 := t2.CeilShift(t2.CeilDiv(img.XOffset+img.Width, comp.DX), r)
+		cy0 := t2.CeilShift(t2.CeilDiv(img.YOffset, comp.DY), r)
+		cy1 := t2.CeilShift(t2.CeilDiv(img.YOffset+img.Height, comp.DY), r)
 		src := img.Planes[c]
 		if src.Width != cx1-cx0 || src.Height != cy1-cy0 || len(src.Pix) != src.Width*src.Height {
 			return nil, fmt.Errorf("jpx: plane %d does not match the image geometry", c)

@@ -18,6 +18,7 @@ import (
 	"seehuhn.de/go/jpx/internal/dwt"
 	"seehuhn.de/go/jpx/internal/jp2"
 	"seehuhn.de/go/jpx/internal/t1"
+	"seehuhn.de/go/jpx/internal/t2"
 	"seehuhn.de/go/membudget"
 )
 
@@ -248,8 +249,8 @@ func validateImage(img *Image) error {
 		if c.DX < 1 || c.DX > 255 || c.DY < 1 || c.DY > 255 {
 			return fmt.Errorf("jpx: component %d has invalid sub-sampling", i)
 		}
-		w := ceilDiv(h.XOffset+h.Width, c.DX) - ceilDiv(h.XOffset, c.DX)
-		hh := ceilDiv(h.YOffset+h.Height, c.DY) - ceilDiv(h.YOffset, c.DY)
+		w := t2.CeilDiv(h.XOffset+h.Width, c.DX) - t2.CeilDiv(h.XOffset, c.DX)
+		hh := t2.CeilDiv(h.YOffset+h.Height, c.DY) - t2.CeilDiv(h.YOffset, c.DY)
 		pl := img.Planes[i]
 		if pl.Width != w || pl.Height != hh || (w > 0 && hh > math.MaxInt/8/w) || len(pl.Pix) != w*hh {
 			return fmt.Errorf("jpx: plane %d has size %dx%d, want %dx%d", i, pl.Width, pl.Height, w, hh)

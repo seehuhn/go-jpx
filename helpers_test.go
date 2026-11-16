@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"seehuhn.de/go/jpx/internal/t2"
 	"seehuhn.de/go/membudget"
 )
 
@@ -227,11 +228,11 @@ func TestUpsample(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			full := Plane{Width: ceilShift(c.x0+c.w, c.reduce) - ceilShift(c.x0, c.reduce),
-				Height: ceilShift(c.y0+c.h, c.reduce) - ceilShift(c.y0, c.reduce)}
+			full := Plane{Width: t2.CeilShift(c.x0+c.w, c.reduce) - t2.CeilShift(c.x0, c.reduce),
+				Height: t2.CeilShift(c.y0+c.h, c.reduce) - t2.CeilShift(c.y0, c.reduce)}
 			full.Pix = make([]int32, full.Width*full.Height)
-			cw := ceilDiv(c.x0+c.w, c.dx) - ceilDiv(c.x0, c.dx)
-			ch := ceilDiv(c.y0+c.h, c.dy) - ceilDiv(c.y0, c.dy)
+			cw := t2.CeilDiv(c.x0+c.w, c.dx) - t2.CeilDiv(c.x0, c.dx)
+			ch := t2.CeilDiv(c.y0+c.h, c.dy) - t2.CeilDiv(c.y0, c.dy)
 			img := &Image{
 				XOffset: c.x0, YOffset: c.y0, Width: c.w, Height: c.h,
 				Components: []Component{
@@ -349,8 +350,8 @@ func TestUpsampleErrors(t *testing.T) {
 func refUpsample(img *Image, c int, x, y int) int32 {
 	comp := img.Components[c]
 	pl := img.Planes[c]
-	cx0 := ceilDiv(img.XOffset, comp.DX)
-	cy0 := ceilDiv(img.YOffset, comp.DY)
+	cx0 := t2.CeilDiv(img.XOffset, comp.DX)
+	cy0 := t2.CeilDiv(img.YOffset, comp.DY)
 	xc := min(max(x/comp.DX, cx0), cx0+pl.Width-1)
 	yc := min(max(y/comp.DY, cy0), cy0+pl.Height-1)
 	return pl.At(xc-cx0, yc-cy0)

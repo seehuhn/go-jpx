@@ -1643,7 +1643,7 @@ func TestHostileJP2Boxes(t *testing.T) {
 		hs = hostileMeasure(4<<20, func(b *membudget.Budget) {
 			var err error
 			if img, err = Decode(bytes.NewReader(data), &Options{Budget: b}); err == nil {
-				_, err = ApplyPalette(img, b)
+				ApplyPalette(img, b)
 			}
 		})
 		hs.check(t, name+" (palette)")

@@ -385,8 +385,8 @@ func (t *Tile) yieldPosition(yield func(Packet) bool, v volume, c, r, x, y int) 
 	if int64(x)%xstep != 0 && (x != t.Bounds.X0 || xAligned) {
 		return true
 	}
-	px := ceilShift(ceilDiv(x, tc.DX), shift)>>uint(res.PPx) - res.Bounds.X0>>uint(res.PPx)
-	py := ceilShift(ceilDiv(y, tc.DY), shift)>>uint(res.PPy) - res.Bounds.Y0>>uint(res.PPy)
+	px := CeilShift(CeilDiv(x, tc.DX), shift)>>uint(res.PPx) - res.Bounds.X0>>uint(res.PPx)
+	py := CeilShift(CeilDiv(y, tc.DY), shift)>>uint(res.PPy) - res.Bounds.Y0>>uint(res.PPy)
 	if px < 0 || px >= res.PW || py < 0 || py >= res.PH {
 		return true
 	}

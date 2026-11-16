@@ -33,8 +33,8 @@ func testImageAt(x0, y0, w, h int, comps []Component, seed uint64) *Image {
 	rng := rand.New(rand.NewPCG(seed, 99))
 	img := &Image{XOffset: x0, YOffset: y0, Width: w, Height: h, Components: comps}
 	for ci, c := range comps {
-		pw := ceilDiv(x0+w, c.DX) - ceilDiv(x0, c.DX)
-		ph := ceilDiv(y0+h, c.DY) - ceilDiv(y0, c.DY)
+		pw := t2.CeilDiv(x0+w, c.DX) - t2.CeilDiv(x0, c.DX)
+		ph := t2.CeilDiv(y0+h, c.DY) - t2.CeilDiv(y0, c.DY)
 		img.Components[ci].Width, img.Components[ci].Height = pw, ph
 		l, u := sampleRange(c)
 		lo, hi := float64(l), float64(u)
@@ -281,7 +281,7 @@ func TestReduceDecoding(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reduce %d: %v", reduce, err)
 		}
-		wantW, wantH := ceilShift(97, reduce), ceilShift(75, reduce)
+		wantW, wantH := t2.CeilShift(97, reduce), t2.CeilShift(75, reduce)
 		for c, p := range got.Planes {
 			if p.Width != wantW || p.Height != wantH {
 				t.Fatalf("reduce %d: plane %d is %dx%d, want %dx%d", reduce, c, p.Width, p.Height, wantW, wantH)
