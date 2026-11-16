@@ -5,7 +5,6 @@ package jp2
 
 import (
 	"encoding/binary"
-	"errors"
 	"io"
 	"math"
 )
@@ -16,9 +15,6 @@ import (
 // the codestream box.  Empty fields are omitted.  If h.Brand is empty, it
 // defaults to "jp2 ", and so does the compatibility list if it is nil.
 func Write(w io.Writer, h *Header, codestream []byte) error {
-	if h == nil {
-		return errors.New("jp2: nil header")
-	}
 	jp2h, err := h.encodeJp2h()
 	if err != nil {
 		return err

@@ -574,9 +574,6 @@ func TestWriteValidation(t *testing.T) {
 			t.Errorf("%s accepted", name)
 		}
 	}
-	if err := Write(io.Discard, nil, nil); err == nil {
-		t.Error("nil header accepted")
-	}
 }
 
 func TestWriteEmptySlicesOmitted(t *testing.T) {

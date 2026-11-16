@@ -423,9 +423,6 @@ func TestEncodeErrors(t *testing.T) {
 			t.Errorf("%s: no error", c.name)
 		}
 	}
-	if err := Encode(&bytes.Buffer{}, nil, nil); err == nil {
-		t.Error("nil image: no error")
-	}
 }
 
 func TestRoundTripOffset(t *testing.T) {

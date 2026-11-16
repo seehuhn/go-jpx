@@ -164,6 +164,7 @@ const (
 
 // Encode writes img as a JPEG 2000 codestream, or as a JP2 file when
 // p.Wrapper is set.  The planes of img must be at full resolution.
+// A nil p is the zero EncodeParams.
 func Encode(w io.Writer, img *Image, p *EncodeParams) error {
 	if p == nil {
 		p = &EncodeParams{}
@@ -223,9 +224,6 @@ func newEncoder(img *Image, p *EncodeParams) (*encoder, error) {
 // validateImage checks that the image is consistent with its header and
 // that every sample fits its component's range.
 func validateImage(img *Image) error {
-	if img == nil {
-		return errors.New("jpx: nil image")
-	}
 	h := &img.Header
 	if h.Width <= 0 || h.Height <= 0 || h.XOffset < 0 || h.YOffset < 0 ||
 		uint64(h.XOffset)+uint64(h.Width) > math.MaxUint32 || uint64(h.YOffset)+uint64(h.Height) > math.MaxUint32 {
