@@ -210,10 +210,9 @@ type Options struct {
 	// and the decoded planes, and the decoding work.  Every allocation
 	// whose size depends on the input is charged before it is made, and
 	// decoding work is charged at one byte per coefficient per coding
-	// pass, so that a budget bounds the CPU time as well, at a few
-	// nanoseconds per charged byte.  Exceeding the budget aborts decoding
-	// with membudget.ErrExceeded.  A nil Budget imposes no limit; callers
-	// decoding untrusted input must supply one.
+	// pass, so that a budget bounds the CPU time as well.  Exceeding the
+	// budget aborts decoding with membudget.ErrExceeded.  A nil Budget
+	// imposes no limit; callers decoding untrusted input must supply one.
 	Budget *membudget.Budget
 
 	// Reduce discards this many resolution levels: the result has

@@ -116,7 +116,7 @@ Every allocation whose size depends on the input is charged to the
 `*membudget.Budget` (from `seehuhn.de/go/membudget`) passed in `Options`
 before it is made, including the decoded planes.  Decoding work is
 charged at one byte per coefficient per coding pass, so the budget also
-bounds CPU time, at roughly a few nanoseconds per charged byte.
+bounds CPU time.
 Exceeding the budget fails with `membudget.ErrExceeded`.  Without a
 budget, as with the standard library's image decoders, nothing is
 limited: callers decoding untrusted input must pass one.
