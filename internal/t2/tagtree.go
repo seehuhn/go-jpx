@@ -3,7 +3,10 @@
 
 package t2
 
-import "errors"
+import (
+	"errors"
+	"math"
+)
 
 type node struct {
 	value int  // true value (encoder side)
@@ -23,9 +26,8 @@ type Tree struct {
 	levels []level
 }
 
-// maxTreeLeaves bounds the leaf count of a tree.  Callers charge the
-// memory for their trees to a budget before constructing them; the bound
-// only protects against integer overflow in the size computation.
+// maxTreeLeaves bounds the leaf count of a tree, to protect against
+// integer overflow in the size computation.
 const maxTreeLeaves = 1 << 30
 
 // NewTree creates a tree for w×h leaves.  A tree with no leaves is
@@ -49,30 +51,16 @@ func NewTree(w, h int) *Tree {
 	return t
 }
 
-// Reset forgets all values and coding state.
-func (t *Tree) Reset() {
-	for _, l := range t.levels {
-		clear(l.nodes)
-	}
-}
-
-func (t *Tree) inRange(x, y int) bool {
-	return len(t.levels) > 0 && x >= 0 && y >= 0 && x < t.levels[0].w && y < t.levels[0].h
-}
-
 // SetValue sets the value of leaf (x,y) for encoding.  Values must be
 // non-negative and must be set before encoding starts; leaves that are
-// never set have value zero.  Leaves outside the tree are ignored.
+// never set have value zero.
 func (t *Tree) SetValue(x, y, v int) {
-	if !t.inRange(x, y) || v < 0 {
-		return
-	}
 	t.levels[0].nodes[y*t.levels[0].w+x].value = v
 	// recompute the minima along the path to the root
 	for i := 1; i < len(t.levels); i++ {
 		x, y = x/2, y/2
 		child := &t.levels[i-1]
-		m := int(^uint(0) >> 1)
+		m := math.MaxInt
 		for cy := 2 * y; cy < min(2*y+2, child.h); cy++ {
 			for cx := 2 * x; cx < min(2*x+2, child.w); cx++ {
 				m = min(m, child.nodes[cy*child.w+cx].value)
@@ -99,9 +87,6 @@ func (t *Tree) path(x, y int, buf *[maxLevels]*node) []*node {
 // Encode emits the bits that let a decoder learn whether the value of leaf
 // (x,y) is below threshold, and its exact value if it is.
 func (t *Tree) Encode(w *BitWriter, x, y, threshold int) {
-	if !t.inRange(x, y) {
-		return
-	}
 	var buf [maxLevels]*node
 	low := 0
 	for _, n := range t.path(x, y, &buf) {
@@ -123,9 +108,6 @@ func (t *Tree) Encode(w *BitWriter, x, y, threshold int) {
 // Decode reads the bits written by Encode with the same arguments.  It
 // reports whether the value of leaf (x,y) is known and below threshold.
 func (t *Tree) Decode(r *BitReader, x, y, threshold int) (bool, error) {
-	if !t.inRange(x, y) {
-		return false, errors.New("tag tree leaf out of range")
-	}
 	var buf [maxLevels]*node
 	low := 0
 	var leaf *node
@@ -152,17 +134,11 @@ func (t *Tree) Decode(r *BitReader, x, y, threshold int) (bool, error) {
 // Value returns the current lower bound of leaf (x,y), which is the exact
 // value once it is known.
 func (t *Tree) Value(x, y int) int {
-	if !t.inRange(x, y) {
-		return 0
-	}
 	return t.levels[0].nodes[y*t.levels[0].w+x].low
 }
 
 // EncodeValue emits all bits needed to convey the exact value of leaf (x,y).
 func (t *Tree) EncodeValue(w *BitWriter, x, y int) {
-	if !t.inRange(x, y) {
-		return
-	}
 	t.Encode(w, x, y, t.levels[0].nodes[y*t.levels[0].w+x].value+1)
 }
 
@@ -172,9 +148,6 @@ func (t *Tree) EncodeValue(w *BitWriter, x, y int) {
 // already establishes as a lower bound would read nothing and are
 // skipped, so the cost is proportional to the bits consumed.
 func (t *Tree) DecodeValue(r *BitReader, x, y, maxValue int) (int, error) {
-	if !t.inRange(x, y) {
-		return 0, errors.New("tag tree leaf out of range")
-	}
 	for th := t.lowerBound(x, y) + 1; th <= maxValue+1; th++ {
 		ok, err := t.Decode(r, x, y, th)
 		if err != nil {
@@ -206,9 +179,6 @@ func (t *Tree) lowerBound(x, y int) int {
 // decoded.  Lower bounds are propagated downwards like Decode does, so a
 // subsequent Decode behaves identically.
 func (t *Tree) SkipWidth(x, y, threshold int) int {
-	if !t.inRange(x, y) {
-		return 0
-	}
 	low := 0
 	for i := len(t.levels) - 1; i >= 0; i-- {
 		l := &t.levels[i]
